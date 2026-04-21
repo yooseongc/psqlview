@@ -1,0 +1,10 @@
+target/
+dist/
+.git/
+.github/
+.claude/
+.vscode/
+.idea/
+*.log
+*.tmp
+docker-compose.override.yml

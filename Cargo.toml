@@ -1,0 +1,52 @@
+[package]
+name = "psqlview"
+version = "0.1.0"
+edition = "2021"
+description = "Terminal UI for exploring PostgreSQL (14+)"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[[bin]]
+name = "psqlview"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+thiserror = "2"
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "io-std"] }
+futures-util = "0.3"
+
+tokio-postgres = { version = "0.7", features = ["runtime", "with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
+tokio-postgres-rustls = "0.13"
+postgres-types = { version = "0.2", features = ["with-chrono-0_4"] }
+
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "0.26"
+rustls-pki-types = "1"
+
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+tui-textarea = "0.7"
+unicode-width = "0.2"
+
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+rust_decimal = { version = "1", default-features = false, features = ["std", "db-postgres"] }
+uuid = { version = "1", features = ["v4"] }
+serde_json = "1"
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+zeroize = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "test-util"] }
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
+opt-level = "z"
+panic = "abort"
