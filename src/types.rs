@@ -150,4 +150,33 @@ mod tests {
         assert_eq!(ServerVersion::from_num(140005).display(), "14.5");
         assert_eq!(ServerVersion::from_num(170000).display(), "17.0");
     }
+
+    #[test]
+    fn cell_value_display_covers_every_variant() {
+        let date = NaiveDate::from_ymd_opt(2026, 4, 22).unwrap();
+        let time = NaiveTime::from_hms_opt(12, 34, 56).unwrap();
+        let ts = NaiveDateTime::new(date, time);
+        let tstz = DateTime::<Utc>::from_naive_utc_and_offset(ts, Utc);
+
+        assert_eq!(CellValue::Null.to_string(), "NULL");
+        assert_eq!(CellValue::Bool(true).to_string(), "true");
+        assert_eq!(CellValue::Bool(false).to_string(), "false");
+        assert_eq!(CellValue::Int(-7).to_string(), "-7");
+        assert_eq!(CellValue::Float(3.5).to_string(), "3.5");
+        assert_eq!(CellValue::Text("hi".into()).to_string(), "hi");
+        assert_eq!(
+            CellValue::Numeric(Decimal::new(12345, 2)).to_string(),
+            "123.45"
+        );
+        assert_eq!(CellValue::Date(date).to_string(), "2026-04-22");
+        assert_eq!(CellValue::Time(time).to_string(), "12:34:56");
+        assert_eq!(CellValue::Timestamp(ts).to_string(), "2026-04-22 12:34:56");
+        assert_eq!(
+            CellValue::TimestampTz(tstz).to_string(),
+            "2026-04-22 12:34:56Z"
+        );
+        assert_eq!(CellValue::Json("[1,2]".into()).to_string(), "[1,2]");
+        assert_eq!(CellValue::Bytes(1024).to_string(), "<1024 bytes>");
+        assert_eq!(CellValue::Unsupported("inet".into()).to_string(), "<inet>");
+    }
 }

@@ -156,7 +156,9 @@ fn draw_table(
                 Cell::from(Line::from(vec![
                     Span::styled(
                         c.name.clone(),
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
                         format!("  {}", c.type_name),
@@ -173,7 +175,11 @@ fn draw_table(
         .iter()
         .map(|r| {
             let slice = &r[state.x_offset..state.x_offset + visible_cols];
-            Row::new(slice.iter().map(|v| Cell::from(truncate_for_cell(&v.to_string()))))
+            Row::new(
+                slice
+                    .iter()
+                    .map(|v| Cell::from(truncate_for_cell(&v.to_string()))),
+            )
         })
         .collect();
 
@@ -249,7 +255,35 @@ fn truncate_for_cell(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{CellValue, ColumnMeta};
+    use crate::types::{CellValue, ColumnMeta, ResultSet};
+    use crossterm::event::KeyModifiers;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn sample_result() -> ResultSet {
+        ResultSet {
+            columns: vec![
+                ColumnMeta {
+                    name: "a".into(),
+                    type_name: "int4".into(),
+                },
+                ColumnMeta {
+                    name: "b".into(),
+                    type_name: "text".into(),
+                },
+            ],
+            rows: vec![
+                vec![CellValue::Int(1), CellValue::Text("x".into())],
+                vec![CellValue::Int(2), CellValue::Text("y".into())],
+                vec![CellValue::Int(3), CellValue::Text("z".into())],
+            ],
+            truncated_at: None,
+            command_tag: Some("3 rows".into()),
+            elapsed_ms: 1,
+        }
+    }
 
     #[test]
     fn compute_widths_respects_bounds() {
@@ -276,5 +310,96 @@ mod tests {
         let t = truncate_for_cell(&s);
         assert!(t.ends_with('…'));
         assert!(UnicodeWidthStr::width(t.as_str()) <= MAX_CELL_WIDTH as usize);
+    }
+
+    #[test]
+    fn handle_key_is_safe_on_empty_state() {
+        let mut s = ResultsState::default();
+        for code in [
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Home,
+            KeyCode::End,
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::Char('j'),
+            KeyCode::Char('k'),
+            KeyCode::Char('h'),
+            KeyCode::Char('l'),
+        ] {
+            s.handle_key(key(code));
+        }
+        assert_eq!(s.selected_row, 0);
+        assert_eq!(s.x_offset, 0);
+        assert!(s.current.is_none());
+    }
+
+    #[test]
+    fn handle_key_respects_row_and_col_bounds() {
+        let mut s = ResultsState::default();
+        s.set_result(sample_result());
+
+        for _ in 0..10 {
+            s.handle_key(key(KeyCode::Down));
+        }
+        assert_eq!(s.selected_row, 2);
+
+        s.handle_key(key(KeyCode::Home));
+        assert_eq!(s.selected_row, 0);
+
+        s.handle_key(key(KeyCode::PageDown));
+        assert_eq!(s.selected_row, 2); // capped at max
+
+        s.handle_key(key(KeyCode::End));
+        assert_eq!(s.selected_row, 2);
+
+        s.handle_key(key(KeyCode::PageUp));
+        assert_eq!(s.selected_row, 0);
+
+        for _ in 0..10 {
+            s.handle_key(key(KeyCode::Right));
+        }
+        assert_eq!(s.x_offset, 1); // col_count - 1
+
+        for _ in 0..10 {
+            s.handle_key(key(KeyCode::Left));
+        }
+        assert_eq!(s.x_offset, 0);
+    }
+
+    #[test]
+    fn compute_widths_handles_offset_slice() {
+        let cols = vec![
+            ColumnMeta {
+                name: "a".into(),
+                type_name: "int".into(),
+            },
+            ColumnMeta {
+                name: "b".into(),
+                type_name: "int".into(),
+            },
+            ColumnMeta {
+                name: "c".into(),
+                type_name: "int".into(),
+            },
+        ];
+        let rows = vec![vec![
+            CellValue::Int(1),
+            CellValue::Int(2),
+            CellValue::Int(3),
+        ]];
+        let widths = compute_widths(&cols, &rows, 1, 2);
+        assert_eq!(widths.len(), 2);
+        for w in widths {
+            // Each Constraint::Min(w) should have w in [MIN_CELL_WIDTH, MAX_CELL_WIDTH].
+            match w {
+                ratatui::layout::Constraint::Min(n) => {
+                    assert!((MIN_CELL_WIDTH..=MAX_CELL_WIDTH).contains(&n));
+                }
+                other => panic!("unexpected constraint: {other:?}"),
+            }
+        }
     }
 }

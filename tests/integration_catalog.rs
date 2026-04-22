@@ -15,7 +15,9 @@ async fn list_schemas_excludes_system_schemas() {
     }
     let (client, _handle) = connect_plain().await;
     let schemas = catalog::list_schemas(&client).await.expect("list schemas");
-    assert!(!schemas.iter().any(|s| s.starts_with("pg_") || s == "information_schema"));
+    assert!(!schemas
+        .iter()
+        .any(|s| s.starts_with("pg_") || s == "information_schema"));
     assert!(schemas.iter().any(|s| s == "public"));
     assert!(
         schemas.iter().any(|s| s == "psqlview_test"),
@@ -36,8 +38,14 @@ async fn list_relations_returns_fixture_tables_and_view() {
         .await
         .expect("list relations");
 
-    let users = relations.iter().find(|r| r.name == "users").expect("users table");
-    let orders = relations.iter().find(|r| r.name == "orders").expect("orders table");
+    let users = relations
+        .iter()
+        .find(|r| r.name == "users")
+        .expect("users table");
+    let orders = relations
+        .iter()
+        .find(|r| r.name == "orders")
+        .expect("orders table");
     let view = relations
         .iter()
         .find(|r| r.name == "paid_orders")
@@ -46,6 +54,21 @@ async fn list_relations_returns_fixture_tables_and_view() {
     assert_eq!(users.kind, RelationKind::Table);
     assert_eq!(orders.kind, RelationKind::Table);
     assert_eq!(view.kind, RelationKind::View);
+}
+
+#[tokio::test]
+#[ignore = "requires PSQLVIEW_PG_URL"]
+async fn list_databases_includes_postgres() {
+    init_crypto();
+    if pg_url().is_none() {
+        return;
+    }
+    let (client, _handle) = connect_plain().await;
+    let dbs = catalog::list_databases(&client)
+        .await
+        .expect("list databases");
+    assert!(dbs.iter().any(|d| d == "postgres"), "got: {dbs:?}");
+    assert!(!dbs.iter().any(|d| d == "template0" || d == "template1"));
 }
 
 #[tokio::test]
@@ -64,7 +87,14 @@ async fn list_columns_returns_ordered_schema() {
     let names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(
         names,
-        vec!["id", "email", "display_name", "created_at", "balance", "metadata"]
+        vec![
+            "id",
+            "email",
+            "display_name",
+            "created_at",
+            "balance",
+            "metadata"
+        ]
     );
     let email = columns.iter().find(|c| c.name == "email").unwrap();
     assert!(!email.nullable);
