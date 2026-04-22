@@ -4,3 +4,5 @@ dist/
 .idea/
 .vscode/
 docker-compose.override.yml
+.claude/settings.local.json
+.claude/worktrees/
