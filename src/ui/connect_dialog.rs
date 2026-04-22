@@ -164,12 +164,7 @@ fn current_field(focus: usize) -> Field {
     Field::ALL[focus % Field::ALL.len()]
 }
 
-pub fn draw(
-    frame: &mut Frame<'_>,
-    state: &mut ConnectDialogState,
-    connecting: bool,
-    area: Rect,
-) {
+pub fn draw(frame: &mut Frame<'_>, state: &mut ConnectDialogState, connecting: bool, area: Rect) {
     frame.render_widget(Clear, area);
 
     let dialog_w = 60u16.min(area.width.saturating_sub(4));
@@ -222,7 +217,13 @@ pub fn draw(
         &"•".repeat(state.password.chars().count()),
         rows[4],
     );
-    draw_field(frame, state, Field::SslMode, state.ssl_mode.label(), rows[5]);
+    draw_field(
+        frame,
+        state,
+        Field::SslMode,
+        state.ssl_mode.label(),
+        rows[5],
+    );
 
     let hint = if connecting {
         "Esc: cancel"
@@ -246,12 +247,16 @@ fn draw_field(
 ) {
     let focused = current_field(state.focus) == field;
     let label_style = if focused {
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::Gray)
     };
     let value_style = if focused {
-        Style::default().fg(Color::White).add_modifier(Modifier::UNDERLINED)
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::UNDERLINED)
     } else {
         Style::default().fg(Color::White)
     };

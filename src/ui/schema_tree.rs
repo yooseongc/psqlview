@@ -41,9 +41,20 @@ pub struct SchemaTreeState {
 /// Reference to the currently selected logical node, without borrowing.
 #[derive(Debug, Clone)]
 pub enum NodeRef {
-    Schema { name: String, loaded: bool },
-    Relation { schema: String, name: String, loaded: bool },
-    Column { schema: String, relation: String, name: String },
+    Schema {
+        name: String,
+        loaded: bool,
+    },
+    Relation {
+        schema: String,
+        name: String,
+        loaded: bool,
+    },
+    Column {
+        schema: String,
+        relation: String,
+        name: String,
+    },
 }
 
 impl SchemaTreeState {
@@ -101,7 +112,10 @@ impl SchemaTreeState {
     }
 
     pub fn current_node(&self) -> Option<NodeRef> {
-        self.flatten().into_iter().nth(self.selected).map(|f| f.node)
+        self.flatten()
+            .into_iter()
+            .nth(self.selected)
+            .map(|f| f.node)
     }
 
     pub fn toggle_current(&mut self) {
@@ -245,7 +259,9 @@ pub fn draw(frame: &mut Frame<'_>, state: &SchemaTreeState, focused: bool, area:
         .map(|row| {
             let indent = "  ".repeat(row.depth);
             let style = match &row.node {
-                NodeRef::Schema { .. } => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                NodeRef::Schema { .. } => Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
                 NodeRef::Relation { .. } => Style::default().fg(Color::White),
                 NodeRef::Column { .. } => Style::default().fg(Color::Gray),
             };
@@ -275,4 +291,96 @@ pub fn draw(frame: &mut Frame<'_>, state: &SchemaTreeState, focused: bool, area:
         list_state.select(Some(state.selected.min(rows.len() - 1)));
     }
     frame.render_stateful_widget(list, area, &mut list_state);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rel(name: &str) -> Relation {
+        Relation {
+            name: name.into(),
+            kind: RelationKind::Table,
+        }
+    }
+
+    fn col(name: &str) -> Column {
+        Column {
+            name: name.into(),
+            data_type: "text".into(),
+            nullable: true,
+            default: None,
+        }
+    }
+
+    #[test]
+    fn flatten_order_matches_selection_indexing() {
+        let mut s = SchemaTreeState::default();
+        s.set_schemas(vec!["a".into(), "b".into()]);
+        // Expand schema "a" via toggle (selection is already 0).
+        s.toggle_current();
+        s.set_relations("a", vec![rel("t")]);
+        // Move down to the relation and toggle to expand it.
+        s.move_down();
+        s.toggle_current();
+        s.set_columns("a", "t", vec![col("c1"), col("c2")]);
+
+        let flat = s.flatten();
+        let labels: Vec<_> = flat
+            .iter()
+            .map(|r| match &r.node {
+                NodeRef::Schema { name, .. } => format!("S:{name}"),
+                NodeRef::Relation { schema, name, .. } => format!("R:{schema}.{name}"),
+                NodeRef::Column { name, .. } => format!("C:{name}"),
+            })
+            .collect();
+        assert_eq!(labels, vec!["S:a", "R:a.t", "C:c1", "C:c2", "S:b"]);
+
+        s.selected = 3;
+        match s.current_node() {
+            Some(NodeRef::Column { name, .. }) => assert_eq!(name, "c2"),
+            other => panic!("expected column c2, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expand_collapse_roundtrip_preserves_selection_bounds() {
+        let mut s = SchemaTreeState::default();
+        s.set_schemas(vec!["a".into()]);
+        s.toggle_current();
+        s.set_relations("a", vec![rel("t")]);
+        s.move_down();
+        s.toggle_current();
+        s.set_columns("a", "t", vec![col("c1")]);
+        // Navigate to the column.
+        s.move_down();
+        s.move_down();
+        assert_eq!(s.selected, 2);
+        // Collapse the schema — tree shrinks to [S:a].
+        s.selected = 0;
+        s.collapse_current();
+        // Now move_down must not panic nor exceed the new upper bound.
+        for _ in 0..10 {
+            s.move_down();
+        }
+        assert_eq!(s.flatten().len(), 1);
+        assert_eq!(s.selected, 0);
+    }
+
+    #[test]
+    fn toggle_current_on_column_is_noop() {
+        let mut s = SchemaTreeState::default();
+        s.set_schemas(vec!["a".into()]);
+        s.toggle_current();
+        s.set_relations("a", vec![rel("t")]);
+        s.move_down();
+        s.toggle_current();
+        s.set_columns("a", "t", vec![col("c1")]);
+        // Select the column.
+        s.selected = 2;
+        let before = s.flatten().len();
+        s.toggle_current();
+        s.collapse_current();
+        assert_eq!(s.flatten().len(), before);
+    }
 }

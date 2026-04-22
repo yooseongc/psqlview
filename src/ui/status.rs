@@ -16,7 +16,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App, area: Rect) {
         .unwrap_or_else(|| "disconnected".into());
     spans.push(Span::styled(
         label,
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
     ));
     spans.push(Span::raw("  "));
 
@@ -31,7 +33,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let status_span = match &app.query_status {
         QueryStatus::Idle => Span::styled("idle", Style::default().fg(Color::DarkGray)),
         QueryStatus::Running { started_at, .. } => Span::styled(
-            format!("running {:.1}s (Esc cancels)", started_at.elapsed().as_secs_f32()),
+            format!(
+                "running {:.1}s (Esc cancels)",
+                started_at.elapsed().as_secs_f32()
+            ),
             Style::default().fg(Color::Yellow),
         ),
         QueryStatus::Done { elapsed } => Span::styled(

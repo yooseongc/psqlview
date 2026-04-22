@@ -37,3 +37,41 @@ INSERT INTO psqlview_test.orders(user_id, amount, status) VALUES
     (1, 5.00,   'pending'),
     (2, 42.00,  'cancelled')
 ON CONFLICT DO NOTHING;
+
+-- Per-type fixture for convert_cell round-trip coverage.
+-- Two rows only: values (id=1) and NULLs (id=2), so tests can match by id.
+CREATE TABLE IF NOT EXISTS psqlview_test.all_types (
+    id            INT PRIMARY KEY,
+    c_bool        BOOLEAN,
+    c_int2        SMALLINT,
+    c_int4        INTEGER,
+    c_int8        BIGINT,
+    c_float4      REAL,
+    c_float8      DOUBLE PRECISION,
+    c_numeric     NUMERIC(10, 2),
+    c_text        TEXT,
+    c_date        DATE,
+    c_time        TIME,
+    c_timestamp   TIMESTAMP,
+    c_timestamptz TIMESTAMPTZ,
+    c_json        JSON,
+    c_jsonb       JSONB,
+    c_uuid        UUID,
+    c_bytea       BYTEA,
+    c_inet        INET
+);
+
+INSERT INTO psqlview_test.all_types VALUES
+    (1, true, -32768, -2147483648, 9223372036854775807,
+     1.5::real, 2.5::double precision, 123.45,
+     'hello',
+     DATE '2026-04-22', TIME '12:34:56',
+     TIMESTAMP '2026-04-22 12:34:56',
+     TIMESTAMPTZ '2026-04-22 12:34:56+00',
+     '{"k":1}'::json, '{"k":1}'::jsonb,
+     '00000000-0000-0000-0000-000000000001'::uuid,
+     '\x010203'::bytea,
+     '10.0.0.1'::inet),
+    (2, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+     NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+ON CONFLICT (id) DO NOTHING;

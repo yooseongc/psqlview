@@ -378,10 +378,82 @@ fn is_ctrl_q(k: &KeyEvent) -> bool {
 mod tests {
     use super::*;
 
+    fn app_with_channel() -> (App, mpsc::UnboundedReceiver<AppEvent>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (App::new(tx), rx)
+    }
+
     #[test]
     fn focus_cycles_tree_editor_results() {
         assert_eq!(FocusPane::Tree.cycle(), FocusPane::Editor);
         assert_eq!(FocusPane::Editor.cycle(), FocusPane::Results);
         assert_eq!(FocusPane::Results.cycle(), FocusPane::Tree);
+    }
+
+    #[test]
+    fn connect_result_err_stays_on_connect_and_sets_error_toast() {
+        let (mut app, _rx) = app_with_channel();
+        app.connecting = true;
+        app.on_event(AppEvent::ConnectResult(Err(db::DbError::Connect(
+            "boom".into(),
+        ))));
+        assert_eq!(app.screen, Screen::Connect);
+        assert!(!app.connecting);
+        let t = app.toast.as_ref().expect("toast set");
+        assert!(t.is_error);
+        assert!(t.message.contains("connect failed"), "got: {}", t.message);
+    }
+
+    #[test]
+    fn schemas_loaded_ok_populates_tree() {
+        let (mut app, _rx) = app_with_channel();
+        app.on_event(AppEvent::SchemasLoaded(Ok(vec!["public".into()])));
+        assert_eq!(app.tree.schemas.len(), 1);
+        assert_eq!(app.tree.schemas[0].name, "public");
+    }
+
+    #[test]
+    fn schemas_loaded_err_sets_error_toast() {
+        let (mut app, _rx) = app_with_channel();
+        app.on_event(AppEvent::SchemasLoaded(Err(db::DbError::Connect(
+            "x".into(),
+        ))));
+        let t = app.toast.as_ref().expect("toast set");
+        assert!(t.is_error);
+        assert!(t.message.contains("load schemas"), "got: {}", t.message);
+    }
+
+    #[test]
+    fn relations_loaded_err_toast_mentions_schema() {
+        let (mut app, _rx) = app_with_channel();
+        app.on_event(AppEvent::RelationsLoaded {
+            schema: "s".into(),
+            result: Err(db::DbError::Connect("x".into())),
+        });
+        let t = app.toast.as_ref().expect("toast set");
+        assert!(t.is_error);
+        assert!(t.message.contains("(s)"), "got: {}", t.message);
+    }
+
+    #[test]
+    fn tick_clears_expired_toast() {
+        let (mut app, _rx) = app_with_channel();
+        app.on_event(AppEvent::SchemasLoaded(Err(db::DbError::Connect(
+            "x".into(),
+        ))));
+        assert!(app.toast.is_some());
+        app.toast.as_mut().unwrap().until = Instant::now() - Duration::from_millis(1);
+        app.on_event(AppEvent::Tick);
+        assert!(app.toast.is_none());
+    }
+
+    #[test]
+    fn tick_keeps_fresh_toast() {
+        let (mut app, _rx) = app_with_channel();
+        app.on_event(AppEvent::SchemasLoaded(Err(db::DbError::Connect(
+            "x".into(),
+        ))));
+        app.on_event(AppEvent::Tick);
+        assert!(app.toast.is_some());
     }
 }
