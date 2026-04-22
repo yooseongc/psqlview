@@ -173,7 +173,10 @@ mod tests {
     fn strip_handles_line_and_block_comments() {
         assert_eq!(strip_leading_noise("  -- hi\nSELECT 1"), "SELECT 1");
         assert_eq!(strip_leading_noise("/* x */ SELECT 1"), "SELECT 1");
-        assert_eq!(strip_leading_noise("  \n\t  INSERT INTO t VALUES (1)"), "INSERT INTO t VALUES (1)");
+        assert_eq!(
+            strip_leading_noise("  \n\t  INSERT INTO t VALUES (1)"),
+            "INSERT INTO t VALUES (1)"
+        );
     }
 
     #[test]
@@ -185,5 +188,27 @@ mod tests {
         assert!(!returns_rows("INSERT INTO t VALUES (1)"));
         assert!(!returns_rows("BEGIN"));
         assert!(!returns_rows("CREATE TABLE x (id int)"));
+    }
+
+    #[test]
+    fn strip_handles_unterminated_comments() {
+        assert_eq!(strip_leading_noise("-- no newline"), "");
+        assert_eq!(strip_leading_noise("/* not closed"), "");
+        // Still handles multiple comment prefixes that eventually stop at real SQL.
+        assert_eq!(
+            strip_leading_noise("/* a */ -- b\n/* c */SELECT 1"),
+            "SELECT 1"
+        );
+    }
+
+    #[test]
+    fn returns_rows_is_case_insensitive_and_handles_whitespace() {
+        assert!(returns_rows("  \nSelect 1"));
+        assert!(returns_rows("\t\tshow TIMEZONE"));
+        assert!(returns_rows("fetch 10 FROM c"));
+        assert!(returns_rows("Table foo"));
+        assert!(!returns_rows("deallocate all"));
+        assert!(!returns_rows("copy t to stdout"));
+        assert!(!returns_rows(""));
     }
 }
