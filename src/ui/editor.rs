@@ -11,11 +11,17 @@ pub struct EditorState {
     area: TextArea<'static>,
 }
 
+impl Default for EditorState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EditorState {
     pub fn new() -> Self {
         let mut area = TextArea::default();
         area.set_line_number_style(Style::default().fg(Color::DarkGray));
-        area.set_placeholder_text("-- Ctrl+Enter or F5 to run, Tab cycles focus");
+        area.set_placeholder_text("-- F5 to run, Tab cycles focus");
         area.set_cursor_line_style(Style::default().add_modifier(Modifier::UNDERLINED));
         area.set_style(Style::default().fg(Color::White));
         Self { area }
