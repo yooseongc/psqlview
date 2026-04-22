@@ -133,7 +133,10 @@ mod tests {
     fn relation_kind_maps_all_supported_letters() {
         assert_eq!(RelationKind::from_relkind("r"), RelationKind::Table);
         assert_eq!(RelationKind::from_relkind("v"), RelationKind::View);
-        assert_eq!(RelationKind::from_relkind("m"), RelationKind::MaterializedView);
+        assert_eq!(
+            RelationKind::from_relkind("m"),
+            RelationKind::MaterializedView
+        );
         assert_eq!(RelationKind::from_relkind("p"), RelationKind::Partitioned);
         assert_eq!(RelationKind::from_relkind("f"), RelationKind::Foreign);
         assert_eq!(RelationKind::from_relkind("z"), RelationKind::Other);

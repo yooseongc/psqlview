@@ -53,7 +53,12 @@ fn draw_workspace(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         app.focus == FocusPane::Tree,
         horizontal[0],
     );
-    editor::draw(frame, &mut app.editor, app.focus == FocusPane::Editor, right[0]);
+    editor::draw(
+        frame,
+        &mut app.editor,
+        app.focus == FocusPane::Editor,
+        right[0],
+    );
     results::draw(
         frame,
         &app.results,
@@ -94,7 +99,9 @@ fn draw_toast(frame: &mut Frame<'_>, toast: &Toast, area: Rect) {
 
 pub(crate) fn focus_style(focused: bool) -> Style {
     if focused {
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::DarkGray)
     }
