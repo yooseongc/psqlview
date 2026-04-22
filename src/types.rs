@@ -48,7 +48,7 @@ pub enum CellValue {
     TimestampTz(DateTime<Utc>),
     Json(String),
     Bytes(usize),
-    Unsupported(&'static str),
+    Unsupported(String),
 }
 
 impl fmt::Display for CellValue {

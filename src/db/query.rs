@@ -94,12 +94,13 @@ fn row_to_cells(row: &Row) -> Vec<CellValue> {
 }
 
 fn convert_cell(row: &Row, idx: usize, ty: &Type) -> CellValue {
+    let name = ty.name().to_string();
     macro_rules! opt {
         ($t:ty, $map:expr) => {
             match row.try_get::<usize, Option<$t>>(idx) {
                 Ok(Some(v)) => $map(v),
                 Ok(None) => CellValue::Null,
-                Err(_) => CellValue::Unsupported(ty.name()),
+                Err(_) => CellValue::Unsupported(name.clone()),
             }
         };
     }
@@ -127,9 +128,9 @@ fn convert_cell(row: &Row, idx: usize, ty: &Type) -> CellValue {
         Type::BYTEA => match row.try_get::<usize, Option<Vec<u8>>>(idx) {
             Ok(Some(v)) => CellValue::Bytes(v.len()),
             Ok(None) => CellValue::Null,
-            Err(_) => CellValue::Unsupported(ty.name()),
+            Err(_) => CellValue::Unsupported(name.clone()),
         },
-        _ => CellValue::Unsupported(ty.name()),
+        _ => CellValue::Unsupported(name),
     }
 }
 
@@ -154,7 +155,7 @@ pub fn strip_leading_noise(sql: &str) -> &str {
 }
 
 pub fn returns_rows(sql: &str) -> bool {
-    let first: String = sql
+    let first: String = strip_leading_noise(sql)
         .chars()
         .take_while(|c| c.is_ascii_alphabetic())
         .collect();

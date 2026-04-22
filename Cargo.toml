@@ -6,6 +6,10 @@ description = "Terminal UI for exploring PostgreSQL (14+)"
 license = "MIT OR Apache-2.0"
 publish = false
 
+[lib]
+name = "psqlview"
+path = "src/lib.rs"
+
 [[bin]]
 name = "psqlview"
 path = "src/main.rs"
