@@ -1,7 +1,6 @@
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::layout::Rect;
 use tokio::sync::mpsc;
 use tokio_postgres::CancelToken;
 
@@ -14,6 +13,7 @@ use crate::ui::connect_dialog::ConnectDialogState;
 use crate::ui::editor::EditorState;
 use crate::ui::results::ResultsState;
 use crate::ui::schema_tree::SchemaTreeState;
+use crate::ui::PaneRects;
 
 /// Top-level screen the app is rendering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,32 +87,6 @@ pub struct App {
     tx: mpsc::UnboundedSender<AppEvent>,
 }
 
-#[derive(Default, Debug, Clone, Copy)]
-pub struct PaneRects {
-    pub tree: Rect,
-    pub editor: Rect,
-    pub results: Rect,
-}
-
-impl PaneRects {
-    pub fn hit_test(&self, x: u16, y: u16) -> Option<FocusPane> {
-        if rect_contains(self.editor, x, y) {
-            return Some(FocusPane::Editor);
-        }
-        if rect_contains(self.results, x, y) {
-            return Some(FocusPane::Results);
-        }
-        if rect_contains(self.tree, x, y) {
-            return Some(FocusPane::Tree);
-        }
-        None
-    }
-}
-
-fn rect_contains(r: Rect, x: u16, y: u16) -> bool {
-    r.width > 0 && r.height > 0 && x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
-}
-
 impl App {
     pub fn new(tx: mpsc::UnboundedSender<AppEvent>) -> Self {
         Self {
@@ -162,6 +136,15 @@ impl App {
         }
     }
 
+    /// Sets focus to `pane`, closing the autocomplete popup if the new
+    /// pane isn't the editor (the popup only makes sense while editing).
+    fn set_focus(&mut self, pane: FocusPane) {
+        self.focus = pane;
+        if pane != FocusPane::Editor {
+            self.autocomplete = None;
+        }
+    }
+
     fn on_mouse(&mut self, ev: MouseEvent) {
         if self.screen != Screen::Workspace {
             return;
@@ -170,10 +153,7 @@ impl App {
         match ev.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(pane) = target {
-                    self.focus = pane;
-                    if pane != FocusPane::Editor {
-                        self.autocomplete = None;
-                    }
+                    self.set_focus(pane);
                 }
             }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
@@ -241,10 +221,7 @@ impl App {
                 _ => None,
             };
             if let Some(pane) = target {
-                self.focus = pane;
-                if pane != FocusPane::Editor {
-                    self.autocomplete = None;
-                }
+                self.set_focus(pane);
                 return;
             }
         }
@@ -340,6 +317,18 @@ impl App {
         }
     }
 
+    /// Closes the autocomplete popup if the current prefix is empty or
+    /// no longer matches any candidate.
+    fn close_popup_if_stale(&mut self) {
+        let should_close = match self.autocomplete.as_ref() {
+            Some(popup) => popup.prefix().is_empty() || popup.is_empty(),
+            None => return,
+        };
+        if should_close {
+            self.autocomplete = None;
+        }
+    }
+
     /// Returns true if the key was consumed by the popup.
     fn handle_autocomplete_key(&mut self, key: KeyEvent) -> bool {
         let Some(popup) = self.autocomplete.as_mut() else {
@@ -369,24 +358,19 @@ impl App {
                 if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
             {
                 // Let the editor insert the character, then extend the filter.
-                // If no candidates remain, close the popup.
                 self.editor.handle_key(key);
                 if let Some(popup) = self.autocomplete.as_mut() {
                     popup.extend_prefix(c);
-                    if popup.is_empty() {
-                        self.autocomplete = None;
-                    }
                 }
+                self.close_popup_if_stale();
                 true
             }
             KeyCode::Backspace => {
                 self.editor.handle_key(key);
                 if let Some(popup) = self.autocomplete.as_mut() {
                     popup.shrink_prefix();
-                    if popup.prefix().is_empty() || popup.is_empty() {
-                        self.autocomplete = None;
-                    }
                 }
+                self.close_popup_if_stale();
                 true
             }
             _ => {
@@ -604,6 +588,7 @@ fn is_ctrl_q(k: &KeyEvent) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::layout::Rect;
 
     fn app_with_channel() -> (App, mpsc::UnboundedReceiver<AppEvent>) {
         let (tx, rx) = mpsc::unbounded_channel();

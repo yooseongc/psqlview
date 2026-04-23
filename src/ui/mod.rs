@@ -128,3 +128,64 @@ pub(crate) fn focus_style(focused: bool) -> Style {
         Style::default().fg(Color::DarkGray)
     }
 }
+
+/// Screen-space rectangles of the three workspace panes as of the last
+/// frame. Used to route mouse events to the pane under the pointer.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct PaneRects {
+    pub tree: Rect,
+    pub editor: Rect,
+    pub results: Rect,
+}
+
+impl PaneRects {
+    pub fn hit_test(&self, x: u16, y: u16) -> Option<FocusPane> {
+        if rect_contains(self.editor, x, y) {
+            return Some(FocusPane::Editor);
+        }
+        if rect_contains(self.results, x, y) {
+            return Some(FocusPane::Results);
+        }
+        if rect_contains(self.tree, x, y) {
+            return Some(FocusPane::Tree);
+        }
+        None
+    }
+}
+
+fn rect_contains(r: Rect, x: u16, y: u16) -> bool {
+    r.width > 0 && r.height > 0 && x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hit_test_returns_pane_containing_point() {
+        let p = PaneRects {
+            tree: Rect::new(0, 0, 30, 10),
+            editor: Rect::new(30, 0, 50, 5),
+            results: Rect::new(30, 5, 50, 5),
+        };
+        assert_eq!(p.hit_test(5, 5), Some(FocusPane::Tree));
+        assert_eq!(p.hit_test(50, 2), Some(FocusPane::Editor));
+        assert_eq!(p.hit_test(50, 7), Some(FocusPane::Results));
+    }
+
+    #[test]
+    fn hit_test_returns_none_outside_any_pane() {
+        let p = PaneRects {
+            tree: Rect::new(0, 0, 30, 10),
+            editor: Rect::new(30, 0, 50, 5),
+            results: Rect::new(30, 5, 50, 5),
+        };
+        assert_eq!(p.hit_test(200, 200), None);
+    }
+
+    #[test]
+    fn hit_test_handles_zero_sized_rects() {
+        let p = PaneRects::default();
+        assert_eq!(p.hit_test(0, 0), None);
+    }
+}
