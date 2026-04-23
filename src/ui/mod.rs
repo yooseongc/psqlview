@@ -1,3 +1,4 @@
+pub mod autocomplete;
 pub mod connect_dialog;
 pub mod editor;
 pub mod results;
@@ -47,38 +48,54 @@ fn draw_workspace(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
         .split(horizontal[1]);
 
-    schema_tree::draw(
-        frame,
-        &app.tree,
-        app.focus == FocusPane::Tree,
-        horizontal[0],
-    );
+    let tree_rect = horizontal[0];
+    let editor_rect = right[0];
+    let results_rect = right[1];
+
+    app.pane_rects.tree = tree_rect;
+    app.pane_rects.editor = editor_rect;
+    app.pane_rects.results = results_rect;
+
+    schema_tree::draw(frame, &app.tree, app.focus == FocusPane::Tree, tree_rect);
     editor::draw(
         frame,
         &mut app.editor,
         app.focus == FocusPane::Editor,
-        right[0],
+        editor_rect,
     );
     results::draw(
         frame,
         &app.results,
         &app.query_status,
         app.focus == FocusPane::Results,
-        right[1],
+        results_rect,
     );
+
+    if let Some(popup) = &app.autocomplete {
+        autocomplete::draw(frame, popup, editor_rect);
+    }
+
     status::draw(frame, app, status_area);
 }
 
 fn draw_toast(frame: &mut Frame<'_>, toast: &Toast, area: Rect) {
-    let width = toast.message.chars().count().min(area.width as usize - 4) as u16 + 4;
-    let height = 3u16;
+    let max_inner_width = area.width.saturating_sub(4) as usize;
+    let lines: Vec<&str> = toast.message.split('\n').collect();
+    let widest = lines
+        .iter()
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(max_inner_width);
+    let width = (widest as u16).saturating_add(4);
+    let height = (lines.len() as u16).saturating_add(2); // +2 for borders
     let x = area.x + area.width.saturating_sub(width).saturating_sub(2);
     let y = area.y + 1;
     let rect = Rect {
         x,
         y,
         width: width.min(area.width),
-        height: height.min(area.height),
+        height: height.min(area.height.saturating_sub(1)),
     };
 
     let style = if toast.is_error {
@@ -87,11 +104,16 @@ fn draw_toast(frame: &mut Frame<'_>, toast: &Toast, area: Rect) {
         Style::default().fg(Color::Black).bg(Color::Green)
     };
     let block = Block::default().borders(Borders::ALL).style(style);
-    let paragraph = Paragraph::new(Line::from(Span::styled(
-        toast.message.as_str(),
-        Style::default().add_modifier(Modifier::BOLD),
-    )))
-    .block(block);
+    let text: Vec<Line> = lines
+        .iter()
+        .map(|l| {
+            Line::from(Span::styled(
+                (*l).to_string(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ))
+        })
+        .collect();
+    let paragraph = Paragraph::new(text).block(block);
 
     frame.render_widget(Clear, rect);
     frame.render_widget(paragraph, rect);

@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crossterm::event::{Event as CtEvent, EventStream, KeyEvent};
+use crossterm::event::{Event as CtEvent, EventStream, KeyEvent, MouseEvent};
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -14,6 +14,8 @@ use crate::types::ResultSet;
 /// background tasks (connect, query execution, catalog loads).
 pub enum AppEvent {
     Key(KeyEvent),
+    Mouse(MouseEvent),
+    Paste(String),
     Resize(u16, u16),
     Tick,
 
@@ -49,6 +51,12 @@ pub fn spawn_terminal_events(tx: mpsc::UnboundedSender<AppEvent>) -> JoinHandle<
                     match maybe {
                         Some(Ok(CtEvent::Key(k))) => {
                             if tx.send(AppEvent::Key(k)).is_err() { break; }
+                        }
+                        Some(Ok(CtEvent::Mouse(m))) => {
+                            if tx.send(AppEvent::Mouse(m)).is_err() { break; }
+                        }
+                        Some(Ok(CtEvent::Paste(s))) => {
+                            if tx.send(AppEvent::Paste(s)).is_err() { break; }
                         }
                         Some(Ok(CtEvent::Resize(w, h))) => {
                             if tx.send(AppEvent::Resize(w, h)).is_err() { break; }

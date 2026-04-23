@@ -3,7 +3,9 @@ use std::panic;
 use std::time::Duration;
 
 use anyhow::Context;
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -11,7 +13,6 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tokio::sync::mpsc;
-use tracing_subscriber::EnvFilter;
 
 use psqlview::{app::App, event, ui};
 
@@ -19,7 +20,6 @@ type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 fn main() -> anyhow::Result<()> {
     install_rustls_provider()?;
-    init_logging()?;
     install_panic_hook();
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -78,7 +78,13 @@ async fn run_app(terminal: &mut Tui) -> anyhow::Result<()> {
 fn setup_terminal() -> anyhow::Result<Tui> {
     enable_raw_mode().context("enable raw mode")?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture).context("enter alternate screen")?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )
+    .context("enter alternate screen")?;
     let backend = CrosstermBackend::new(stdout);
     Terminal::new(backend).context("construct terminal")
 }
@@ -87,6 +93,7 @@ fn restore_terminal(terminal: &mut Tui) -> anyhow::Result<()> {
     disable_raw_mode().ok();
     execute!(
         terminal.backend_mut(),
+        DisableBracketedPaste,
         LeaveAlternateScreen,
         DisableMouseCapture
     )
@@ -100,7 +107,12 @@ fn install_panic_hook() {
     panic::set_hook(Box::new(move |info| {
         // Best-effort terminal restoration so the panic message is readable.
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+        let _ = execute!(
+            io::stdout(),
+            DisableBracketedPaste,
+            LeaveAlternateScreen,
+            DisableMouseCapture
+        );
         default(info);
     }));
 }
@@ -109,34 +121,4 @@ fn install_rustls_provider() -> anyhow::Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
         .map_err(|_| anyhow::anyhow!("another rustls CryptoProvider is already installed"))
-}
-
-fn init_logging() -> anyhow::Result<()> {
-    let log_dir = log_directory();
-    std::fs::create_dir_all(&log_dir).ok();
-    let file_appender = tracing_appender::rolling::daily(&log_dir, "psqlview.log");
-    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
-    // Leak the guard so it lives for the lifetime of the process; otherwise
-    // the writer would drop on function exit and flushing would be skipped.
-    Box::leak(Box::new(guard));
-
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .with_writer(non_blocking)
-        .with_ansi(false)
-        .with_target(false)
-        .init();
-    Ok(())
-}
-
-fn log_directory() -> std::path::PathBuf {
-    if let Ok(state) = std::env::var("XDG_STATE_HOME") {
-        return std::path::PathBuf::from(state).join("psqlview");
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        return std::path::PathBuf::from(home).join(".local/state/psqlview");
-    }
-    std::env::temp_dir().join("psqlview")
 }

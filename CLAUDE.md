@@ -162,7 +162,8 @@ top-level `App` never touches the ratatui widgets directly.
   a non-`'static` slice for custom types, so we allocate. Don't revert
   to `&'static str`.
 - Toasts auto-expire; set with `App::toast_info` / `toast_error`.
-- Logs go to a daily-rolling file under `$XDG_STATE_HOME/psqlview/` or
-  `~/.local/state/psqlview/` — never stdout (it would corrupt the TUI).
+- No logging subscriber is installed. `tracing::*!` macros stay in the
+  code as no-ops. If diagnostics are needed, install a file-based
+  subscriber — never stdout (corrupts TUI).
 - Passwords are zeroized on `ConnInfo::drop` via the `zeroize` crate.
   Keep it that way; if you add new secret fields, zeroize them too.

@@ -3,7 +3,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Borders};
 use ratatui::Frame;
-use tui_textarea::{Input, TextArea};
+use tui_textarea::{Input, Key, Scrolling, TextArea};
 
 use super::focus_style;
 
@@ -21,7 +21,7 @@ impl EditorState {
     pub fn new() -> Self {
         let mut area = TextArea::default();
         area.set_line_number_style(Style::default().fg(Color::DarkGray));
-        area.set_placeholder_text("-- F5 to run, Tab cycles focus");
+        area.set_placeholder_text("-- F5 / Ctrl+Enter to run, Tab = autocomplete");
         area.set_cursor_line_style(Style::default().add_modifier(Modifier::UNDERLINED));
         area.set_style(Style::default().fg(Color::White));
         Self { area }
@@ -35,13 +35,227 @@ impl EditorState {
         let input = Input::from(key);
         self.area.input(input);
     }
+
+    /// Returns the identifier prefix ending at the cursor column, or an empty
+    /// string when the cursor is not sitting after `[A-Za-z_][A-Za-z0-9_]*`.
+    pub fn word_prefix_before_cursor(&self) -> String {
+        let (row, col) = self.area.cursor();
+        let Some(line) = self.area.lines().get(row) else {
+            return String::new();
+        };
+        let chars: Vec<char> = line.chars().collect();
+        let col = col.min(chars.len());
+        let mut start = col;
+        while start > 0 {
+            let c = chars[start - 1];
+            if c == '_' || c.is_ascii_alphanumeric() {
+                start -= 1;
+            } else {
+                break;
+            }
+        }
+        if start == col {
+            return String::new();
+        }
+        // First character of a SQL identifier cannot be a digit.
+        if chars[start].is_ascii_digit() {
+            return String::new();
+        }
+        chars[start..col].iter().collect()
+    }
+
+    /// Replaces the identifier prefix ending at the cursor with `new`.
+    pub fn replace_word_prefix(&mut self, new: &str) {
+        let prefix_len = self.word_prefix_before_cursor().chars().count();
+        for _ in 0..prefix_len {
+            self.area.input(Input {
+                key: Key::Backspace,
+                ctrl: false,
+                alt: false,
+                shift: false,
+            });
+        }
+        for c in new.chars() {
+            self.area.input(Input {
+                key: Key::Char(c),
+                ctrl: false,
+                alt: false,
+                shift: false,
+            });
+        }
+    }
+
+    /// Inserts an arbitrary string at the cursor, preserving newlines and
+    /// tabs. Used for bracketed paste. CRLF is normalized to LF so Windows
+    /// clipboard contents don't produce blank lines.
+    pub fn insert_str(&mut self, s: &str) {
+        for c in s.chars() {
+            let key = match c {
+                '\r' => continue, // drop; real newline is the following \n
+                '\n' => Key::Enter,
+                '\t' => Key::Tab,
+                other => Key::Char(other),
+            };
+            self.area.input(Input {
+                key,
+                ctrl: false,
+                alt: false,
+                shift: false,
+            });
+        }
+    }
+
+    pub fn scroll_lines(&mut self, delta: i16) {
+        self.area.scroll(Scrolling::Delta {
+            rows: delta,
+            cols: 0,
+        });
+    }
+
+    pub fn insert_spaces(&mut self, n: usize) {
+        for _ in 0..n {
+            self.area.input(Input {
+                key: Key::Char(' '),
+                ctrl: false,
+                alt: false,
+                shift: false,
+            });
+        }
+    }
+
+    /// Removes up to 2 leading spaces from the current line. No-op if the line
+    /// has no leading whitespace. Cursor column is clamped to the new line
+    /// length if it was inside the removed run.
+    pub fn outdent_current_line(&mut self) {
+        let (row, col) = self.area.cursor();
+        let Some(line) = self.area.lines().get(row).cloned() else {
+            return;
+        };
+        let leading = line.chars().take_while(|c| *c == ' ').count();
+        let remove = leading.min(2);
+        if remove == 0 {
+            return;
+        }
+        // Move cursor to line start, delete `remove` chars, restore column.
+        // tui-textarea has no direct "delete N chars" API from arbitrary
+        // positions, so we use Home + Delete.
+        self.area.input(Input {
+            key: Key::Home,
+            ctrl: false,
+            alt: false,
+            shift: false,
+        });
+        for _ in 0..remove {
+            self.area.input(Input {
+                key: Key::Delete,
+                ctrl: false,
+                alt: false,
+                shift: false,
+            });
+        }
+        let new_col = col.saturating_sub(remove);
+        for _ in 0..new_col {
+            self.area.input(Input {
+                key: Key::Right,
+                ctrl: false,
+                alt: false,
+                shift: false,
+            });
+        }
+    }
+
+    #[cfg(test)]
+    fn type_text(&mut self, s: &str) {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        for c in s.chars() {
+            let key = match c {
+                '\n' => KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                _ => KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+            };
+            self.handle_key(key);
+        }
+    }
 }
 
 pub fn draw(frame: &mut Frame<'_>, state: &mut EditorState, focused: bool, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" SQL editor  [F5 run] ")
+        .title(" SQL editor  [F5 run \u{00b7} Tab complete] ")
         .border_style(focus_style(focused));
     state.area.set_block(block);
     frame.render_widget(&state.area, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    #[test]
+    fn word_prefix_extracts_identifier_before_cursor() {
+        let mut e = EditorState::new();
+        e.type_text("SELECT user");
+        assert_eq!(e.word_prefix_before_cursor(), "user");
+    }
+
+    #[test]
+    fn word_prefix_empty_when_cursor_after_space() {
+        let mut e = EditorState::new();
+        e.type_text("SELECT ");
+        assert_eq!(e.word_prefix_before_cursor(), "");
+    }
+
+    #[test]
+    fn word_prefix_empty_when_cursor_after_digit_start() {
+        let mut e = EditorState::new();
+        e.type_text("123abc");
+        assert_eq!(e.word_prefix_before_cursor(), "");
+    }
+
+    #[test]
+    fn replace_word_prefix_swaps_last_token() {
+        let mut e = EditorState::new();
+        e.type_text("SELECT use");
+        e.replace_word_prefix("users");
+        assert_eq!(e.text(), "SELECT users");
+    }
+
+    #[test]
+    fn outdent_removes_up_to_two_leading_spaces() {
+        let mut e = EditorState::new();
+        e.type_text("    SELECT 1");
+        // Move cursor to line start.
+        for _ in 0..12 {
+            e.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        }
+        e.outdent_current_line();
+        assert_eq!(e.text(), "  SELECT 1");
+        e.outdent_current_line();
+        assert_eq!(e.text(), "SELECT 1");
+        // No leading spaces → no-op.
+        e.outdent_current_line();
+        assert_eq!(e.text(), "SELECT 1");
+    }
+
+    #[test]
+    fn insert_spaces_appends_n_spaces() {
+        let mut e = EditorState::new();
+        e.type_text("a");
+        e.insert_spaces(3);
+        assert_eq!(e.text(), "a   ");
+    }
+
+    #[test]
+    fn insert_str_preserves_newlines() {
+        let mut e = EditorState::new();
+        e.insert_str("SELECT 1\nFROM t;");
+        assert_eq!(e.text(), "SELECT 1\nFROM t;");
+    }
+
+    #[test]
+    fn insert_str_normalizes_crlf() {
+        let mut e = EditorState::new();
+        e.insert_str("a\r\nb");
+        assert_eq!(e.text(), "a\nb");
+    }
 }

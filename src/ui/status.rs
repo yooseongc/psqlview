@@ -50,7 +50,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App, area: Rect) {
     spans.push(Span::raw("  "));
 
     spans.push(Span::styled(
-        "F5 run · Esc cancel · Tab cycle · Ctrl+Q quit",
+        "F2/F3/F4 tree/editor/results · F5 run · Esc cancel · Ctrl+Q quit",
         Style::default().fg(Color::DarkGray),
     ));
 

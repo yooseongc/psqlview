@@ -38,6 +38,13 @@ impl ResultsState {
         self.current = None;
     }
 
+    pub fn scroll_rows(&mut self, delta: i32) {
+        let Some(set) = &self.current else { return };
+        let max = set.rows.len().saturating_sub(1) as i32;
+        let new = (self.selected_row as i32 + delta).clamp(0, max);
+        self.selected_row = new as usize;
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) {
         let Some(set) = &self.current else { return };
         let max = set.rows.len().saturating_sub(1);
@@ -106,12 +113,15 @@ pub fn draw(
 
     match (status, &state.current) {
         (QueryStatus::Failed(msg), _) => {
-            let p = Paragraph::new(Line::from(Span::styled(
-                msg.clone(),
-                Style::default().fg(Color::Red),
-            )))
-            .block(block)
-            .wrap(ratatui::widgets::Wrap { trim: false });
+            // Structured Postgres errors are multi-line (DETAIL/HINT/POSITION
+            // on their own lines). Split explicitly so Paragraph doesn't join.
+            let lines: Vec<Line> = msg
+                .split('\n')
+                .map(|l| Line::from(Span::styled(l.to_string(), Style::default().fg(Color::Red))))
+                .collect();
+            let p = Paragraph::new(lines)
+                .block(block)
+                .wrap(ratatui::widgets::Wrap { trim: false });
             frame.render_widget(p, area);
         }
         (QueryStatus::Running { .. }, _) => {

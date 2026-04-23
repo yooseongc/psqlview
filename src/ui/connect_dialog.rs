@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
@@ -206,29 +206,45 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut ConnectDialogState, connecting: b
         ])
         .split(inner);
 
-    draw_field(frame, state, Field::Host, &state.host, rows[0]);
-    draw_field(frame, state, Field::Port, &state.port, rows[1]);
-    draw_field(frame, state, Field::User, &state.user, rows[2]);
-    draw_field(frame, state, Field::Database, &state.database, rows[3]);
-    draw_field(
+    let mut caret: Option<(u16, u16)> = None;
+    caret = caret.or(draw_field(frame, state, Field::Host, &state.host, rows[0]));
+    caret = caret.or(draw_field(frame, state, Field::Port, &state.port, rows[1]));
+    caret = caret.or(draw_field(frame, state, Field::User, &state.user, rows[2]));
+    caret = caret.or(draw_field(
+        frame,
+        state,
+        Field::Database,
+        &state.database,
+        rows[3],
+    ));
+    caret = caret.or(draw_field(
         frame,
         state,
         Field::Password,
-        &"•".repeat(state.password.chars().count()),
+        &"\u{2022}".repeat(state.password.chars().count()),
         rows[4],
-    );
-    draw_field(
+    ));
+    caret = caret.or(draw_field(
         frame,
         state,
         Field::SslMode,
         state.ssl_mode.label(),
         rows[5],
-    );
+    ));
+
+    // Show a real terminal caret at the focused field's insertion point.
+    // ratatui hides the cursor unless set_cursor_position is called this
+    // frame, so Workspace renders without this automatically.
+    if !connecting {
+        if let Some((x, y)) = caret {
+            frame.set_cursor_position(Position { x, y });
+        }
+    }
 
     let hint = if connecting {
         "Esc: cancel"
     } else {
-        "Tab: next field   Ctrl+Enter / Enter on last: connect   Esc: quit"
+        "Tab: next   Ctrl+Enter / Enter (on last): connect   Ctrl+Q: quit"
     };
     let hint_paragraph = Paragraph::new(Line::from(Span::styled(
         hint,
@@ -244,7 +260,7 @@ fn draw_field(
     field: Field,
     value: &str,
     area: Rect,
-) {
+) -> Option<(u16, u16)> {
     let focused = current_field(state.focus) == field;
     let label_style = if focused {
         Style::default()
@@ -260,12 +276,30 @@ fn draw_field(
     } else {
         Style::default().fg(Color::White)
     };
-    let cursor = if focused { "▎" } else { "  " };
+    const LABEL_WIDTH: u16 = 10;
+    // Line layout: "<label:10>  <value><caret-block>"
+    // Two spaces after the label: one is literal spacing, one holds the
+    // caret block (or pad) so columns stay aligned across fields.
+    let value_len = value.chars().count() as u16;
+    let caret_marker = if focused { "\u{258e}" } else { " " };
     let line = Line::from(vec![
-        Span::styled(format!("{:<10}", field.label()), label_style),
-        Span::raw(" "),
-        Span::styled(cursor, Style::default().fg(Color::Cyan)),
+        Span::styled(
+            format!("{:<w$}", field.label(), w = LABEL_WIDTH as usize),
+            label_style,
+        ),
+        Span::raw("  "),
         Span::styled(value.to_string(), value_style),
+        Span::styled(caret_marker, Style::default().fg(Color::Cyan)),
     ]);
     frame.render_widget(Paragraph::new(line), area);
+
+    if focused {
+        // Caret sits just after the value, where the next char goes. The
+        // block is rendered underneath so even without terminal cursor
+        // support the user sees an anchor.
+        let x = area.x + LABEL_WIDTH + 2 + value_len;
+        Some((x.min(area.x + area.width.saturating_sub(1)), area.y))
+    } else {
+        None
+    }
 }

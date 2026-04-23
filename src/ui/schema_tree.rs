@@ -111,6 +111,12 @@ impl SchemaTreeState {
         }
     }
 
+    pub fn scroll_rows(&mut self, delta: i32) {
+        let max = self.flatten().len().saturating_sub(1) as i32;
+        let new = (self.selected as i32 + delta).clamp(0, max);
+        self.selected = new as usize;
+    }
+
     pub fn current_node(&self) -> Option<NodeRef> {
         self.flatten()
             .into_iter()
@@ -179,6 +185,30 @@ impl SchemaTreeState {
             }
             NodeRef::Column { .. } => {}
         }
+    }
+
+    /// Returns all known identifier names (schemas, relations, columns) for
+    /// autocomplete candidates. Dedups and preserves first-seen order so a
+    /// popup shows stable results. Only walks what's already loaded — no I/O.
+    pub fn collect_identifiers(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let push =
+            |s: &str, out: &mut Vec<String>, seen: &mut std::collections::HashSet<String>| {
+                if seen.insert(s.to_string()) {
+                    out.push(s.to_string());
+                }
+            };
+        for s in &self.schemas {
+            push(&s.name, &mut out, &mut seen);
+            for r in &s.relations {
+                push(&r.name, &mut out, &mut seen);
+                for c in &r.columns {
+                    push(&c.name, &mut out, &mut seen);
+                }
+            }
+        }
+        out
     }
 
     fn flatten(&self) -> Vec<FlatRow> {
@@ -365,6 +395,30 @@ mod tests {
         }
         assert_eq!(s.flatten().len(), 1);
         assert_eq!(s.selected, 0);
+    }
+
+    #[test]
+    fn collect_identifiers_dedups_and_includes_all_levels() {
+        let mut s = SchemaTreeState::default();
+        s.set_schemas(vec!["public".into(), "psqlview_test".into()]);
+        s.set_relations("public", vec![rel("users"), rel("orders")]);
+        s.set_columns("public", "users", vec![col("id"), col("email")]);
+        // Duplicate column name across relations must appear once.
+        s.set_relations("psqlview_test", vec![rel("users")]);
+        s.set_columns("psqlview_test", "users", vec![col("id"), col("name")]);
+
+        let ids = s.collect_identifiers();
+        assert!(ids.contains(&"public".to_string()));
+        assert!(ids.contains(&"psqlview_test".to_string()));
+        assert!(ids.contains(&"users".to_string()));
+        assert!(ids.contains(&"orders".to_string()));
+        assert!(ids.contains(&"id".to_string()));
+        assert!(ids.contains(&"email".to_string()));
+        assert!(ids.contains(&"name".to_string()));
+        // Dedup: "users" and "id" appear multiple times across the tree
+        // but must be in the output only once each.
+        assert_eq!(ids.iter().filter(|n| *n == "users").count(), 1);
+        assert_eq!(ids.iter().filter(|n| *n == "id").count(), 1);
     }
 
     #[test]
