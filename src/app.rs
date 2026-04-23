@@ -18,10 +18,13 @@ use crate::ui::PaneRects;
 /// Top-level screen the app is rendering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
+    /// Login dialog — host/port/user/db/password/ssl.
     Connect,
+    /// Main three-pane layout (tree, editor, results).
     Workspace,
 }
 
+/// Which workspace pane currently receives keyboard input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusPane {
     Tree,
@@ -39,6 +42,7 @@ impl FocusPane {
     }
 }
 
+/// Lifecycle of the currently (or most recently) executing query.
 pub enum QueryStatus {
     Idle,
     Running {
@@ -49,9 +53,13 @@ pub enum QueryStatus {
         elapsed: Duration,
     },
     Cancelled,
+    /// Query failed; the `String` is the pre-formatted multi-line message.
     Failed(String),
 }
 
+/// Transient status overlay shown in the top-right. Construct via
+/// `App::toast_info` / `App::toast_error` rather than building by hand —
+/// those helpers set an appropriate TTL.
 pub struct Toast {
     pub message: String,
     pub until: Instant,
@@ -173,7 +181,7 @@ impl App {
                     "mouse scroll"
                 );
                 match pane {
-                    FocusPane::Editor => self.editor.scroll_lines(delta as i16),
+                    FocusPane::Editor => self.editor.scroll_lines(delta),
                     FocusPane::Results => self.results.scroll_rows(delta),
                     FocusPane::Tree => self.tree.scroll_rows(delta),
                 }

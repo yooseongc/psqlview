@@ -216,6 +216,44 @@ async fn syntax_error_returns_db_error_not_panic() {
 
 #[tokio::test]
 #[ignore = "requires PSQLVIEW_PG_URL"]
+async fn undefined_table_error_renders_sqlstate_and_position_snippet() {
+    init_crypto();
+    if pg_url().is_none() {
+        return;
+    }
+    let (client, _handle) = connect_plain().await;
+    let client = std::sync::Arc::new(client);
+
+    let sql = "SELECT * FROM no_such_relation_xyz";
+    let err = db::query::execute(client, sql)
+        .await
+        .expect_err("undefined table expected");
+    let detailed = err.format_detailed_with_sql(sql);
+    // SQLSTATE 42P01 = undefined_table.
+    assert!(
+        detailed.contains("42P01"),
+        "want SQLSTATE 42P01, got: {detailed}"
+    );
+    assert!(detailed.contains("ERROR"), "want severity: {detailed}");
+    // Snippet: the offending SQL on one line and a caret on the next.
+    let lines: Vec<&str> = detailed.lines().collect();
+    let sql_line = lines
+        .iter()
+        .position(|l| l.trim() == sql.trim())
+        .expect("sql snippet present");
+    let caret_line = lines[sql_line + 1];
+    assert!(
+        caret_line.contains('^'),
+        "want caret line, got: {caret_line}"
+    );
+    assert!(
+        caret_line.contains("line 1"),
+        "want line info, got: {caret_line}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires PSQLVIEW_PG_URL"]
 async fn long_running_query_can_be_cancelled() {
     init_crypto();
     if pg_url().is_none() {

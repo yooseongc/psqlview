@@ -60,6 +60,12 @@ pub const SQL_KEYWORDS: &[&str] = &[
     "RETURNING",
 ];
 
+/// Prefix-filtered candidate list shown as an overlay in the editor pane.
+///
+/// Opened by pressing Tab in the editor when a word prefix (identifier
+/// start) sits at the cursor. Candidates are a snapshot of SQL keywords
+/// plus loaded schema/table/column names; they do not refresh while the
+/// popup is open.
 pub struct AutocompletePopup {
     prefix: String,
     all: Vec<String>,

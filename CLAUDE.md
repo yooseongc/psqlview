@@ -97,9 +97,16 @@ This keeps the draw loop starvation-free and lets us cancel, connect,
 and load catalog data concurrently without a mutex around `App`.
 
 Event channel taxonomy (`src/event.rs`):
-- Input: `Key`, `Resize`, `Tick` (250 ms)
+- Input: `Key`, `Mouse`, `Paste(String)`, `Resize`, `Tick` (250 ms)
 - Completion: `ConnectResult`, `QueryResult`,
   `SchemasLoaded`, `RelationsLoaded`, `ColumnsLoaded`
+
+Mouse and bracketed paste are enabled by `main.rs::setup_terminal`.
+Mouse left-click routes to pane under pointer (via `ui::PaneRects`
+updated each frame); wheel scroll routes to the same pane, falling
+back to the focused pane if coordinates don't hit any rect. Paste
+events are accepted only when the Editor has focus on the Workspace
+screen and are inserted via `EditorState::insert_str` (CRLF → LF).
 
 ### State machine (src/app.rs)
 
@@ -155,6 +162,19 @@ top-level `App` never touches the ratatui widgets directly.
   preserve insertion order so vertical scroll indices stay stable.
 - `tui-textarea` owns its own undo stack and cursor; the editor module
   is a thin wrapper.
+- `autocomplete.rs` holds `AutocompletePopup` — a prefix-filtered
+  candidate list overlaid on the editor. Opened by Tab when a word
+  prefix sits at the cursor. Candidates: hard-coded `SQL_KEYWORDS`
+  plus `SchemaTreeState::collect_identifiers()` (schema/table/column
+  names that have been lazily loaded). The popup is owned by `App`,
+  not by the editor, because it needs access to the schema tree.
+
+Keybinding quick-ref (workspace):
+- `F5` / `Ctrl+Enter` run · `Esc` cancel running query
+- `F2`/`F3`/`F4` focus tree/editor/results (also `Alt+1/2/3` backup)
+- `Tab`/`Shift+Tab` cycle focus (Editor: autocomplete or 2-space
+  indent on empty prefix; Shift+Tab outdents)
+- `Ctrl+Q` / `Ctrl+C` quit. `F10` is NOT bound.
 
 ## Conventions
 

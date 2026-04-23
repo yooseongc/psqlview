@@ -110,11 +110,13 @@ impl EditorState {
         }
     }
 
-    pub fn scroll_lines(&mut self, delta: i16) {
-        self.area.scroll(Scrolling::Delta {
-            rows: delta,
-            cols: 0,
-        });
+    /// Scrolls the viewport by `delta` lines (negative = up). Matches the
+    /// `i32` signature used by `ResultsState::scroll_rows` /
+    /// `SchemaTreeState::scroll_rows` so callers don't juggle types;
+    /// the value is clamped into `i16` for tui-textarea internally.
+    pub fn scroll_lines(&mut self, delta: i32) {
+        let rows = delta.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        self.area.scroll(Scrolling::Delta { rows, cols: 0 });
     }
 
     pub fn insert_spaces(&mut self, n: usize) {
