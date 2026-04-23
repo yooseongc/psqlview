@@ -65,6 +65,11 @@ impl EditorState {
     }
 
     /// Replaces the identifier prefix ending at the cursor with `new`.
+    ///
+    /// Assumes the cursor is sitting immediately after the prefix (this is
+    /// the state right after typing or after the autocomplete popup opens
+    /// — the only places this is called from). If the cursor were elsewhere,
+    /// the backspaces would eat the wrong characters.
     pub fn replace_word_prefix(&mut self, new: &str) {
         let prefix_len = self.word_prefix_before_cursor().chars().count();
         for _ in 0..prefix_len {

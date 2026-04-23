@@ -65,9 +65,24 @@ impl ConnectDialogState {
         }
     }
 
-    pub fn snapshot(&self) -> ConnInfo {
-        let port = self.port.parse().unwrap_or(5432u16);
-        ConnInfo {
+    /// Builds a ConnInfo if the form is valid. Empty port is accepted and
+    /// defaults to 5432; anything else that doesn't parse into a non-zero
+    /// u16 is reported as an error so the caller can show it to the user
+    /// instead of silently falling back.
+    pub fn snapshot(&self) -> Result<ConnInfo, String> {
+        let port = if self.port.is_empty() {
+            5432u16
+        } else {
+            let parsed: u16 = self
+                .port
+                .parse()
+                .map_err(|_| format!("invalid port: {:?}", self.port))?;
+            if parsed == 0 {
+                return Err("port must be 1..=65535".into());
+            }
+            parsed
+        };
+        Ok(ConnInfo {
             host: self.host.clone(),
             port,
             user: self.user.clone(),
@@ -75,7 +90,7 @@ impl ConnectDialogState {
             password: self.password.clone(),
             ssl_mode: self.ssl_mode,
             application_name: self.application_name.clone(),
-        }
+        })
     }
 
     /// Returns true if the user requested submit (Enter on last field or Ctrl+Enter).
@@ -301,5 +316,41 @@ fn draw_field(
         Some((x.min(area.x + area.width.saturating_sub(1)), area.y))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state_with_port(port: &str) -> ConnectDialogState {
+        let mut s = ConnectDialogState::new(ConnInfo::default());
+        s.port.clear();
+        s.port.push_str(port);
+        s
+    }
+
+    #[test]
+    fn snapshot_accepts_empty_port_as_default() {
+        let info = state_with_port("").snapshot().expect("ok");
+        assert_eq!(info.port, 5432);
+    }
+
+    #[test]
+    fn snapshot_rejects_port_zero() {
+        assert!(state_with_port("0").snapshot().is_err());
+    }
+
+    #[test]
+    fn snapshot_rejects_port_out_of_range() {
+        // 99999 doesn't fit in u16 → parse error.
+        let err = state_with_port("99999").snapshot().unwrap_err();
+        assert!(err.contains("invalid port"), "got: {err}");
+    }
+
+    #[test]
+    fn snapshot_accepts_standard_port() {
+        let info = state_with_port("5433").snapshot().expect("ok");
+        assert_eq!(info.port, 5433);
     }
 }

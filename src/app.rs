@@ -458,7 +458,13 @@ impl App {
     }
 
     fn begin_connect(&mut self) {
-        let info = self.connect_dialog.snapshot();
+        let info = match self.connect_dialog.snapshot() {
+            Ok(info) => info,
+            Err(msg) => {
+                self.toast_error(msg);
+                return;
+            }
+        };
         self.connecting = true;
         let tx = self.tx.clone();
         tokio::spawn(async move {
@@ -506,6 +512,7 @@ impl App {
             return;
         }
         let client = session.client();
+        self.autocomplete = None;
         self.query_status = QueryStatus::Running {
             started_at: Instant::now(),
             cancel: session.cancel_token(),

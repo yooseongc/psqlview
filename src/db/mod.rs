@@ -177,6 +177,36 @@ mod tests {
     }
 
     #[test]
+    fn position_snippet_handles_end_of_line_position() {
+        // position one past last char of first line points at the newline.
+        let snip = position_snippet("SELECT 1\nFROM t;", 9).expect("snippet");
+        let lines: Vec<&str> = snip.lines().collect();
+        assert_eq!(lines[0], "  SELECT 1");
+        assert!(lines[1].contains("line 1"));
+        assert!(lines[1].contains("col 9"));
+    }
+
+    #[test]
+    fn position_snippet_handles_position_at_end_of_sql() {
+        // position at the char just past the semicolon.
+        let snip = position_snippet("SELECT 1;", 10).expect("snippet");
+        let lines: Vec<&str> = snip.lines().collect();
+        assert_eq!(lines[0], "  SELECT 1;");
+        assert!(lines[1].contains("col 10"));
+    }
+
+    #[test]
+    fn position_snippet_handles_unicode_identifier() {
+        // Postgres POSITION is character-based (not byte). Identifier "éa"
+        // has 2 chars but 3 bytes. Position 5 points at 'a' of the invalid
+        // ref.
+        let snip = position_snippet("FROM \u{00e9}a", 5).expect("snippet");
+        let lines: Vec<&str> = snip.lines().collect();
+        assert_eq!(lines[0], "  FROM \u{00e9}a");
+        assert!(lines[1].contains("col 5"));
+    }
+
+    #[test]
     fn format_detailed_falls_back_to_display_for_non_query_variants() {
         assert_eq!(
             DbError::Connect("boom".into()).format_detailed(),
