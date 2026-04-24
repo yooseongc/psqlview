@@ -44,9 +44,9 @@ docker compose run --rm --entrypoint cargo builder \
 ### 1. PG 볼륨 리셋 + 컨테이너 기동
 
 **중요**: `docker/init.sql`이 바뀌었거나 처음 실행이면 볼륨을 반드시 비워야
-신규 픽스처(`psqlview_test.all_types` 등)가 로드된다. 볼륨이 남아있으면
-`convert_cell_covers_all_supported_types` 가 "relation does not exist"로
-실패한다.
+신규 픽스처(`psqlview_test.all_types`, `psqlview_bulk.*` 등)가 로드된다.
+볼륨이 남아있으면 `convert_cell_covers_all_supported_types` 가
+"relation does not exist"로 실패한다.
 
 ```sh
 docker compose down -v
@@ -141,12 +141,36 @@ TUI 안에서:
    입력 후 Enter → 상태바에 "connected: ... (pg 16.x)" 토스트.
 2. 좌측 스키마 트리에서 `psqlview_test` 선택 → `l` 또는 `→`로 확장
    → `users`, `orders`, `paid_orders`, `all_types` 보여야 함.
-3. 편집기 포커스(Tab), `SELECT pg_sleep(30);` 입력, F5 → Esc
+3. 편집기 포커스(F3 또는 Tab), `SELECT pg_sleep(30);` 입력, F5 → Esc
    → 1초 이내에 "query cancelled" 토스트.
 4. `SELECT * FROM psqlview_test.users;` + F5 → `j` `k`로 행 이동,
    `h` `l`로 컬럼 수평 스크롤.
 
-종료는 `Ctrl+Q` 또는 `F10`.
+### 페이지 이동 · 검색 · 히스토리 스모크 (psqlview_bulk 픽스처)
+
+`init.sql`이 다음을 같이 심어둔다. 동적 페이지 크기와 `/` 검색을 눈으로
+확인하기 좋다.
+
+- `psqlview_bulk` 스키마 + **50개 테이블**(`t001`..`t050`) — 트리 한 화면 초과
+- `psqlview_bulk.t001` — **500행**
+- `psqlview_bulk.t002` — **2000행**
+- `psqlview_bulk.events` — **1000행, 12컬럼** (Ctrl+←/→ 테스트용)
+
+체크:
+
+5. Tree 포커스(F2) → `psqlview_bulk` 확장 → `PageDown` 연속으로 테이블
+   목록이 화면 높이 단위로 점프. `Home`/`End`로 처음/끝.
+6. Tree에서 `/t04` 입력 → `t040` 근처로 점프, `Enter`로 확정,
+   `n`/`N`으로 매치 순환, `/` 다시 → `t01`로 다른 검색.
+7. Editor에서 `SELECT * FROM psqlview_bulk.t002;` F5 실행 →
+   Results 포커스(F4) → `PageDown` 누를 때 터미널 높이만큼 점프 확인.
+8. `SELECT * FROM psqlview_bulk.events;` F5 실행 → `Ctrl+→`로 마지막
+   컬럼(flagged)까지 점프, `Ctrl+←`로 첫 컬럼 복귀.
+9. 위 두 쿼리를 연달아 실행 후 Editor 포커스 → `Ctrl+↑`/`Ctrl+↓`으로
+   히스토리 순환.
+10. 긴 SQL 여러 줄 입력 후 일부만 드래그 선택 → F5 → 선택 부분만 실행.
+
+종료는 `Ctrl+Q`.
 
 ---
 

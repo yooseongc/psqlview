@@ -75,3 +75,89 @@ INSERT INTO psqlview_test.all_types VALUES
     (2, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
      NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
 ON CONFLICT (id) DO NOTHING;
+
+-- Bulk fixture for exercising pagination and schema-tree navigation.
+-- Keeps the focused psqlview_test fixtures above untouched so existing
+-- unit/integration tests keep their assumptions.
+CREATE SCHEMA IF NOT EXISTS psqlview_bulk;
+
+-- 50 small tables so the schema tree spills past a screenful.
+DO $$
+DECLARE
+    i INT;
+BEGIN
+    FOR i IN 1..50 LOOP
+        EXECUTE format(
+            'CREATE TABLE IF NOT EXISTS psqlview_bulk.t%s (
+                id BIGSERIAL PRIMARY KEY,
+                label TEXT NOT NULL,
+                value NUMERIC(14, 2) NOT NULL DEFAULT 0,
+                tag TEXT,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                note TEXT
+            )',
+            lpad(i::text, 3, '0')
+        );
+    END LOOP;
+END
+$$;
+
+-- Populate a couple of the tables with enough rows to exercise paging.
+INSERT INTO psqlview_bulk.t001 (label, value, tag, note)
+SELECT 'row-' || g,
+       (g % 1000)::numeric + 0.25,
+       CASE (g % 4) WHEN 0 THEN 'alpha'
+                    WHEN 1 THEN 'beta'
+                    WHEN 2 THEN 'gamma'
+                    ELSE 'delta' END,
+       'note for row ' || g
+FROM generate_series(1, 500) AS s(g)
+ON CONFLICT DO NOTHING;
+
+INSERT INTO psqlview_bulk.t002 (label, value, tag, note)
+SELECT 'item-' || g,
+       g::numeric,
+       'tag-' || (g % 10),
+       NULL
+FROM generate_series(1, 2000) AS s(g)
+ON CONFLICT DO NOTHING;
+
+-- A wide(r) table: more columns, 1000 rows. Useful for horizontal
+-- column paging and Ctrl+Left/Ctrl+Right.
+CREATE TABLE IF NOT EXISTS psqlview_bulk.events (
+    id         BIGSERIAL PRIMARY KEY,
+    ts         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    kind       TEXT NOT NULL,
+    actor      TEXT NOT NULL,
+    target     TEXT,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    level      TEXT NOT NULL DEFAULT 'info',
+    message    TEXT NOT NULL,
+    payload    JSONB NOT NULL DEFAULT '{}'::jsonb,
+    source_ip  INET,
+    session    UUID,
+    flagged    BOOLEAN NOT NULL DEFAULT false
+);
+
+INSERT INTO psqlview_bulk.events
+    (ts, kind, actor, target, duration_ms, level, message, payload, source_ip, session, flagged)
+SELECT
+    now() - (g || ' minutes')::interval,
+    CASE (g % 5) WHEN 0 THEN 'login'
+                 WHEN 1 THEN 'query'
+                 WHEN 2 THEN 'export'
+                 WHEN 3 THEN 'schema_load'
+                 ELSE 'cancel' END,
+    'user_' || (g % 20),
+    CASE WHEN g % 3 = 0 THEN NULL ELSE 'target_' || (g % 50) END,
+    (g % 2500),
+    CASE WHEN g % 17 = 0 THEN 'error'
+         WHEN g % 11 = 0 THEN 'warn'
+         ELSE 'info' END,
+    'synthetic event number ' || g,
+    jsonb_build_object('i', g, 'bucket', g % 8),
+    ('10.0.0.' || (g % 255))::inet,
+    gen_random_uuid(),
+    (g % 37 = 0)
+FROM generate_series(1, 1000) AS s(g)
+ON CONFLICT DO NOTHING;
