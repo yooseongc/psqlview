@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -85,6 +86,13 @@ pub struct App {
     /// can place a caret at the reported POSITION.
     pub last_run_sql: Option<String>,
 
+    /// Rolling buffer of executed queries for the current session (newest at
+    /// front). Memory-only — never written to disk.
+    pub history: VecDeque<String>,
+    /// Index into `history` during Ctrl+Up/Ctrl+Down recall. `None` means
+    /// no recall in progress; each edit resets it.
+    pub history_cursor: Option<usize>,
+
     /// Screen rects of the three workspace panes as of the last draw.
     /// Used to route mouse events to the pane under the pointer.
     pub pane_rects: PaneRects,
@@ -109,6 +117,8 @@ impl App {
             connecting: false,
             autocomplete: None,
             last_run_sql: None,
+            history: VecDeque::new(),
+            history_cursor: None,
             pane_rects: PaneRects::default(),
             toast: None,
             should_quit: false,
@@ -211,6 +221,19 @@ impl App {
             self.should_quit = true;
             return;
         }
+        // Esc dismisses a visible toast immediately before anything else
+        // reads Esc. Skipped while a modal sub-state owns Esc: connecting,
+        // running query, active autocomplete, or tree incremental search.
+        if matches!(key.code, KeyCode::Esc)
+            && self.toast.is_some()
+            && !self.connecting
+            && !matches!(self.query_status, QueryStatus::Running { .. })
+            && self.autocomplete.is_none()
+            && self.tree.search.is_none()
+        {
+            self.toast = None;
+            return;
+        }
         // Direct pane switches (Workspace only).
         // Primary: F2/F3/F4 — chosen because they don't clash with common
         // terminal shortcuts (Tabby's Alt+digit hijacks tab switching).
@@ -267,10 +290,35 @@ impl App {
             return;
         }
 
+        // Incremental search in the tree pane absorbs every key until
+        // the user commits (Enter) or cancels (Esc). Otherwise Tab would
+        // cycle focus out mid-search, F5 would run a query, etc.
+        if self.focus == FocusPane::Tree && self.tree.search.is_some() {
+            self.on_key_tree(key);
+            return;
+        }
+
         // Ctrl+Enter runs the current query regardless of focus.
         if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Enter) {
             self.run_current_query();
             return;
+        }
+
+        // Ctrl+Up/Down in the editor recalls past queries from session
+        // history. Ignored outside the editor so the tree/results panes
+        // keep their scroll semantics.
+        if self.focus == FocusPane::Editor && key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Up => {
+                    self.history_prev();
+                    return;
+                }
+                KeyCode::Down => {
+                    self.history_next();
+                    return;
+                }
+                _ => {}
+            }
         }
 
         // While the autocomplete popup is open it consumes most keys first.
@@ -302,7 +350,12 @@ impl App {
                 }
             }
             _ => match self.focus {
-                FocusPane::Editor => self.editor.handle_key(key),
+                FocusPane::Editor => {
+                    self.editor.handle_key(key);
+                    // Any direct edit invalidates an in-progress history
+                    // walk; user is no longer just browsing.
+                    self.history_cursor = None;
+                }
                 FocusPane::Tree => self.on_key_tree(key),
                 FocusPane::Results => self.results.handle_key(key),
             },
@@ -391,9 +444,60 @@ impl App {
     }
 
     fn on_key_tree(&mut self, key: KeyEvent) {
+        // Incremental-search mode: characters extend the needle and
+        // rejump; Enter commits; Esc cancels (last committed needle
+        // preserved so `n`/`N` still work).
+        if self.tree.search.is_some() {
+            match key.code {
+                KeyCode::Char(c) => {
+                    if let Some(needle) = self.tree.search.as_mut() {
+                        needle.push(c);
+                    }
+                    if let Some(needle) = self.tree.search.clone() {
+                        if let Some(idx) = self.tree.find_next(&needle, self.tree.selected) {
+                            self.tree.selected = idx;
+                        }
+                    }
+                }
+                KeyCode::Backspace => {
+                    if let Some(needle) = self.tree.search.as_mut() {
+                        needle.pop();
+                    }
+                }
+                KeyCode::Enter => {
+                    self.tree.last_search = self.tree.search.take();
+                }
+                KeyCode::Esc => {
+                    self.tree.search = None;
+                }
+                _ => {}
+            }
+            return;
+        }
         match key.code {
+            KeyCode::Char('/') => {
+                self.tree.search = Some(String::new());
+            }
+            KeyCode::Char('n') => {
+                if let Some(needle) = self.tree.last_search.clone() {
+                    if let Some(idx) = self.tree.find_next(&needle, self.tree.selected) {
+                        self.tree.selected = idx;
+                    }
+                }
+            }
+            KeyCode::Char('N') => {
+                if let Some(needle) = self.tree.last_search.clone() {
+                    if let Some(idx) = self.tree.find_prev(&needle, self.tree.selected) {
+                        self.tree.selected = idx;
+                    }
+                }
+            }
             KeyCode::Up | KeyCode::Char('k') => self.tree.move_up(),
             KeyCode::Down | KeyCode::Char('j') => self.tree.move_down(),
+            KeyCode::PageUp => self.tree.page_up(),
+            KeyCode::PageDown => self.tree.page_down(),
+            KeyCode::Home => self.tree.jump_to_start(),
+            KeyCode::End => self.tree.jump_to_end(),
             KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => self.expand_current_tree_node(),
             KeyCode::Left | KeyCode::Char('h') => self.tree.collapse_current(),
             _ => {}
@@ -495,19 +599,28 @@ impl App {
     }
 
     fn run_current_query(&mut self) {
-        let Some(session) = &self.session else {
-            return;
+        // Grab the client + cancel token up front so we're done with
+        // &self.session before we take &mut self for history/state.
+        let (client, cancel) = match self.session.as_ref() {
+            Some(s) => (s.client(), s.cancel_token()),
+            None => return,
         };
-        let sql = self.editor.text();
+        // Run just the selected portion when one exists, so users can
+        // execute a single statement from a buffer of many.
+        let sql = self
+            .editor
+            .selected_text()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| self.editor.text());
         if sql.trim().is_empty() {
             self.toast_info("editor is empty".into());
             return;
         }
-        let client = session.client();
         self.autocomplete = None;
+        self.push_history(&sql);
         self.query_status = QueryStatus::Running {
             started_at: Instant::now(),
-            cancel: session.cancel_token(),
+            cancel,
         };
         self.last_run_sql = Some(sql.clone());
         self.results.begin_running();
@@ -559,6 +672,59 @@ impl App {
                 self.query_status = QueryStatus::Failed(detailed.clone());
                 self.results.clear();
                 self.toast_error(detailed);
+            }
+        }
+    }
+
+    const HISTORY_MAX: usize = 50;
+
+    /// Pushes a query onto the in-session history, de-duplicating the most
+    /// recent entry so repeated F5 presses don't spam the buffer. Resets
+    /// the recall cursor.
+    fn push_history(&mut self, sql: &str) {
+        let trimmed = sql.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        if self.history.front().map(|s| s.as_str()) == Some(trimmed) {
+            self.history_cursor = None;
+            return;
+        }
+        self.history.push_front(trimmed.to_string());
+        while self.history.len() > Self::HISTORY_MAX {
+            self.history.pop_back();
+        }
+        self.history_cursor = None;
+    }
+
+    /// Recalls an earlier query into the editor (Ctrl+Up). No-op at the
+    /// oldest entry.
+    fn history_prev(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        let next = match self.history_cursor {
+            None => 0,
+            Some(i) => (i + 1).min(self.history.len() - 1),
+        };
+        if let Some(entry) = self.history.get(next).cloned() {
+            self.editor.set_text(&entry);
+            self.history_cursor = Some(next);
+        }
+    }
+
+    /// Steps back toward the present (Ctrl+Down). At the newest entry it
+    /// clears the editor, matching shell history feel.
+    fn history_next(&mut self) {
+        let Some(i) = self.history_cursor else { return };
+        if i == 0 {
+            self.editor.set_text("");
+            self.history_cursor = None;
+        } else {
+            let new = i - 1;
+            if let Some(entry) = self.history.get(new).cloned() {
+                self.editor.set_text(&entry);
+                self.history_cursor = Some(new);
             }
         }
     }

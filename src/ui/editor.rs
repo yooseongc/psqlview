@@ -31,6 +31,48 @@ impl EditorState {
         self.area.lines().join("\n")
     }
 
+    /// Current cursor position, 1-indexed for human display.
+    pub fn cursor_line_col(&self) -> (usize, usize) {
+        let (row, col) = self.area.cursor();
+        (row + 1, col + 1)
+    }
+
+    /// Returns the currently selected text, or `None` if no selection is
+    /// active. Used to let F5/Ctrl+Enter run just the highlighted SQL.
+    pub fn selected_text(&self) -> Option<String> {
+        let ((r0, c0), (r1, c1)) = self.area.selection_range()?;
+        let lines = self.area.lines();
+        if r0 == r1 {
+            let line = lines.get(r0)?;
+            let chars: Vec<char> = line.chars().collect();
+            let end = c1.min(chars.len());
+            let start = c0.min(end);
+            return Some(chars[start..end].iter().collect());
+        }
+        let mut out = String::new();
+        // First line: from c0 to end.
+        if let Some(first) = lines.get(r0) {
+            let chars: Vec<char> = first.chars().collect();
+            let start = c0.min(chars.len());
+            out.extend(&chars[start..]);
+            out.push('\n');
+        }
+        // Middle lines: whole line.
+        for r in (r0 + 1)..r1 {
+            if let Some(line) = lines.get(r) {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        // Last line: from start to c1.
+        if let Some(last) = lines.get(r1) {
+            let chars: Vec<char> = last.chars().collect();
+            let end = c1.min(chars.len());
+            out.extend(&chars[..end]);
+        }
+        Some(out)
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) {
         let input = Input::from(key);
         self.area.input(input);
@@ -117,6 +159,15 @@ impl EditorState {
     pub fn scroll_lines(&mut self, delta: i32) {
         let rows = delta.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
         self.area.scroll(Scrolling::Delta { rows, cols: 0 });
+    }
+
+    /// Replaces the entire buffer with `s`. Used for history recall.
+    pub fn set_text(&mut self, s: &str) {
+        // Select all and delete, then insert. Preserves tui-textarea's
+        // internal history/undo stack without poking at private state.
+        self.area.select_all();
+        self.area.cut();
+        self.insert_str(s);
     }
 
     pub fn insert_spaces(&mut self, n: usize) {

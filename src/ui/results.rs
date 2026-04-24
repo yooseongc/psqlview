@@ -19,6 +19,9 @@ pub struct ResultsState {
     pub current: Option<ResultSet>,
     pub selected_row: usize,
     pub x_offset: usize,
+    /// Last rendered visible data-row count. Updated each frame so PageUp/
+    /// PageDown can step by a screenful instead of a fixed 20.
+    pub visible_rows: usize,
 }
 
 impl ResultsState {
@@ -48,6 +51,25 @@ impl ResultsState {
     pub fn handle_key(&mut self, key: KeyEvent) {
         let Some(set) = &self.current else { return };
         let max = set.rows.len().saturating_sub(1);
+        // Ctrl+Left / Ctrl+Right jump to the first / last column. Kept
+        // out of the main match so the non-Ctrl arrows keep their
+        // single-column-scroll behavior.
+        if key
+            .modifiers
+            .contains(crossterm::event::KeyModifiers::CONTROL)
+        {
+            match key.code {
+                KeyCode::Left => {
+                    self.x_offset = 0;
+                    return;
+                }
+                KeyCode::Right => {
+                    self.x_offset = set.columns.len().saturating_sub(1);
+                    return;
+                }
+                _ => {}
+            }
+        }
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
                 if self.selected_row > 0 {
@@ -60,10 +82,12 @@ impl ResultsState {
                 }
             }
             KeyCode::PageUp => {
-                self.selected_row = self.selected_row.saturating_sub(20);
+                let step = self.visible_rows.max(1);
+                self.selected_row = self.selected_row.saturating_sub(step);
             }
             KeyCode::PageDown => {
-                self.selected_row = (self.selected_row + 20).min(max);
+                let step = self.visible_rows.max(1);
+                self.selected_row = (self.selected_row + step).min(max);
             }
             KeyCode::Home => self.selected_row = 0,
             KeyCode::End => self.selected_row = max,
@@ -85,11 +109,13 @@ impl ResultsState {
 
 pub fn draw(
     frame: &mut Frame<'_>,
-    state: &ResultsState,
+    state: &mut ResultsState,
     status: &QueryStatus,
     focused: bool,
     area: Rect,
 ) {
+    // 2 border rows + 1 header row = 3 non-data rows.
+    state.visible_rows = area.height.saturating_sub(3) as usize;
     let title = match (status, &state.current) {
         (QueryStatus::Running { started_at, .. }, _) => {
             format!(
@@ -350,6 +376,9 @@ mod tests {
     fn handle_key_respects_row_and_col_bounds() {
         let mut s = ResultsState::default();
         s.set_result(sample_result());
+        // PageUp/PageDown now step by visible_rows, which is set by draw.
+        // Simulate a "screenful" large enough to overshoot the 3-row sample.
+        s.visible_rows = 20;
 
         for _ in 0..10 {
             s.handle_key(key(KeyCode::Down));
@@ -377,6 +406,71 @@ mod tests {
             s.handle_key(key(KeyCode::Left));
         }
         assert_eq!(s.x_offset, 0);
+    }
+
+    fn result_with_rows(n: usize) -> ResultSet {
+        let rows: Vec<Vec<CellValue>> = (0..n).map(|i| vec![CellValue::Int(i as i64)]).collect();
+        ResultSet {
+            columns: vec![ColumnMeta {
+                name: "a".into(),
+                type_name: "int4".into(),
+            }],
+            rows,
+            truncated_at: None,
+            command_tag: Some(format!("{n} rows")),
+            elapsed_ms: 1,
+        }
+    }
+
+    #[test]
+    fn page_down_uses_visible_rows_step() {
+        let mut s = ResultsState::default();
+        s.set_result(result_with_rows(100));
+        s.visible_rows = 10;
+        s.handle_key(key(KeyCode::PageDown));
+        assert_eq!(s.selected_row, 10);
+        s.handle_key(key(KeyCode::PageDown));
+        assert_eq!(s.selected_row, 20);
+    }
+
+    #[test]
+    fn page_up_clamps_to_zero() {
+        let mut s = ResultsState::default();
+        s.set_result(result_with_rows(100));
+        s.visible_rows = 25;
+        s.selected_row = 5;
+        s.handle_key(key(KeyCode::PageUp));
+        assert_eq!(s.selected_row, 0);
+    }
+
+    #[test]
+    fn ctrl_left_jumps_to_first_column() {
+        use crossterm::event::KeyModifiers;
+        let mut s = ResultsState::default();
+        s.set_result(sample_result());
+        s.x_offset = 1;
+        s.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL));
+        assert_eq!(s.x_offset, 0);
+    }
+
+    #[test]
+    fn ctrl_right_jumps_to_last_column() {
+        use crossterm::event::KeyModifiers;
+        let mut s = ResultsState::default();
+        s.set_result(sample_result());
+        s.x_offset = 0;
+        s.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL));
+        // sample_result has 2 columns; last index is 1.
+        assert_eq!(s.x_offset, 1);
+    }
+
+    #[test]
+    fn page_down_falls_back_to_single_step_when_visible_rows_unset() {
+        let mut s = ResultsState::default();
+        s.set_result(result_with_rows(5));
+        // visible_rows defaults to 0 — step is clamped to 1.
+        s.handle_key(key(KeyCode::PageDown));
+        assert_eq!(s.selected_row, 1);
     }
 
     #[test]

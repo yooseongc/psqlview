@@ -1,7 +1,7 @@
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 use crate::db::catalog::{Column, Relation, RelationKind};
@@ -36,6 +36,16 @@ pub struct SchemaEntry {
 pub struct SchemaTreeState {
     pub schemas: Vec<SchemaEntry>,
     pub selected: usize,
+    /// Last rendered visible-row count. Updated by `draw` each frame so
+    /// PageUp/PageDown can step by a screenful rather than a fixed 20.
+    pub visible_rows: usize,
+    /// Incremental search state. `Some(query)` means the user has pressed
+    /// `/` and is typing; an empty string means the prompt is showing
+    /// but no characters have been typed yet.
+    pub search: Option<String>,
+    /// Last committed search needle. Populated on `Enter` after `/`, used
+    /// by `n`/`N` to repeat the search without retyping.
+    pub last_search: Option<String>,
 }
 
 /// Reference to the currently selected logical node, without borrowing.
@@ -115,6 +125,67 @@ impl SchemaTreeState {
         let max = self.flatten().len().saturating_sub(1) as i32;
         let new = (self.selected as i32 + delta).clamp(0, max);
         self.selected = new as usize;
+    }
+
+    pub fn page_up(&mut self) {
+        let step = self.visible_rows.max(1) as i32;
+        self.scroll_rows(-step);
+    }
+
+    pub fn page_down(&mut self) {
+        let step = self.visible_rows.max(1) as i32;
+        self.scroll_rows(step);
+    }
+
+    pub fn jump_to_start(&mut self) {
+        self.selected = 0;
+    }
+
+    pub fn jump_to_end(&mut self) {
+        self.selected = self.flatten().len().saturating_sub(1);
+    }
+
+    /// Finds the next flattened row whose label contains `needle`
+    /// (case-insensitive), starting after `from_exclusive`. Wraps to the
+    /// top if nothing matches beyond the start position. Returns the
+    /// matching index if any.
+    pub fn find_next(&self, needle: &str, from_exclusive: usize) -> Option<usize> {
+        if needle.is_empty() {
+            return None;
+        }
+        let rows = self.flatten();
+        if rows.is_empty() {
+            return None;
+        }
+        let needle_l = needle.to_ascii_lowercase();
+        let n = rows.len();
+        for step in 1..=n {
+            let i = (from_exclusive + step) % n;
+            if rows[i].label.to_ascii_lowercase().contains(&needle_l) {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// Same as `find_next` but scanning backward (wraps downward).
+    pub fn find_prev(&self, needle: &str, from_exclusive: usize) -> Option<usize> {
+        if needle.is_empty() {
+            return None;
+        }
+        let rows = self.flatten();
+        if rows.is_empty() {
+            return None;
+        }
+        let needle_l = needle.to_ascii_lowercase();
+        let n = rows.len();
+        for step in 1..=n {
+            let i = (from_exclusive + n - step) % n;
+            if rows[i].label.to_ascii_lowercase().contains(&needle_l) {
+                return Some(i);
+            }
+        }
+        None
     }
 
     pub fn current_node(&self) -> Option<NodeRef> {
@@ -282,7 +353,31 @@ fn column_label(c: &Column) -> String {
     format!("• {} : {}{}", c.name, c.data_type, nn)
 }
 
-pub fn draw(frame: &mut Frame<'_>, state: &SchemaTreeState, focused: bool, area: Rect) {
+pub fn draw(frame: &mut Frame<'_>, state: &mut SchemaTreeState, focused: bool, area: Rect) {
+    // When an incremental search is active, reserve the bottom row inside
+    // the border for the search prompt.
+    let search_row = state.search.is_some() && area.height >= 3;
+    let search_needle = state.search.clone();
+    let list_area = if search_row {
+        // Reduce by 1 to leave space for the prompt line.
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .split(area);
+        let prompt = format!("/{}", search_needle.as_deref().unwrap_or(""));
+        let p = Paragraph::new(Line::from(Span::styled(
+            prompt,
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+        frame.render_widget(p, chunks[1]);
+        chunks[0]
+    } else {
+        area
+    };
+    // area.height includes the 2 border rows; the inner list takes the rest.
+    state.visible_rows = list_area.height.saturating_sub(2) as usize;
     let rows = state.flatten();
     let items: Vec<ListItem> = rows
         .iter()
@@ -320,7 +415,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &SchemaTreeState, focused: bool, area:
     if !rows.is_empty() {
         list_state.select(Some(state.selected.min(rows.len() - 1)));
     }
-    frame.render_stateful_widget(list, area, &mut list_state);
+    frame.render_stateful_widget(list, list_area, &mut list_state);
 }
 
 #[cfg(test)]
@@ -395,6 +490,70 @@ mod tests {
         }
         assert_eq!(s.flatten().len(), 1);
         assert_eq!(s.selected, 0);
+    }
+
+    #[test]
+    fn page_down_uses_visible_rows_step() {
+        let mut s = SchemaTreeState::default();
+        let schemas: Vec<String> = (0..100).map(|i| format!("s{i}")).collect();
+        s.set_schemas(schemas);
+        s.visible_rows = 10;
+        s.page_down();
+        assert_eq!(s.selected, 10);
+        s.page_down();
+        assert_eq!(s.selected, 20);
+    }
+
+    #[test]
+    fn page_up_clamps_to_zero() {
+        let mut s = SchemaTreeState::default();
+        s.set_schemas(vec!["a".into(), "b".into(), "c".into()]);
+        s.visible_rows = 10;
+        s.page_up();
+        assert_eq!(s.selected, 0);
+    }
+
+    #[test]
+    fn jump_to_start_and_end_for_tree() {
+        let mut s = SchemaTreeState::default();
+        s.set_schemas(vec!["a".into(), "b".into(), "c".into(), "d".into()]);
+        s.jump_to_end();
+        assert_eq!(s.selected, 3);
+        s.jump_to_start();
+        assert_eq!(s.selected, 0);
+    }
+
+    #[test]
+    fn page_down_without_visible_rows_moves_by_one() {
+        let mut s = SchemaTreeState::default();
+        s.set_schemas(vec!["a".into(), "b".into(), "c".into()]);
+        // visible_rows defaults to 0, which is clamped to 1 in page_*.
+        s.page_down();
+        assert_eq!(s.selected, 1);
+    }
+
+    #[test]
+    fn find_next_is_case_insensitive_and_wraps() {
+        let mut s = SchemaTreeState::default();
+        s.set_schemas(vec!["Alpha".into(), "beta".into(), "GAMMA".into()]);
+        assert_eq!(s.find_next("bet", 0), Some(1));
+        // Wrap from last back to first.
+        assert_eq!(s.find_next("alp", 2), Some(0));
+    }
+
+    #[test]
+    fn find_next_returns_none_for_no_match() {
+        let mut s = SchemaTreeState::default();
+        s.set_schemas(vec!["foo".into(), "bar".into()]);
+        assert!(s.find_next("zzz", 0).is_none());
+    }
+
+    #[test]
+    fn find_prev_wraps_downward() {
+        let mut s = SchemaTreeState::default();
+        s.set_schemas(vec!["a".into(), "b".into(), "c".into()]);
+        assert_eq!(s.find_prev("a", 0), Some(0));
+        assert_eq!(s.find_prev("b", 0), Some(1));
     }
 
     #[test]

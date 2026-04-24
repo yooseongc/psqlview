@@ -56,7 +56,12 @@ fn draw_workspace(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     app.pane_rects.editor = editor_rect;
     app.pane_rects.results = results_rect;
 
-    schema_tree::draw(frame, &app.tree, app.focus == FocusPane::Tree, tree_rect);
+    schema_tree::draw(
+        frame,
+        &mut app.tree,
+        app.focus == FocusPane::Tree,
+        tree_rect,
+    );
     editor::draw(
         frame,
         &mut app.editor,
@@ -65,7 +70,7 @@ fn draw_workspace(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     );
     results::draw(
         frame,
-        &app.results,
+        &mut app.results,
         &app.query_status,
         app.focus == FocusPane::Results,
         results_rect,

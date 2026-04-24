@@ -183,7 +183,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut ConnectDialogState, connecting: b
     frame.render_widget(Clear, area);
 
     let dialog_w = 60u16.min(area.width.saturating_sub(4));
-    let dialog_h = 16u16.min(area.height.saturating_sub(2));
+    let dialog_h = 17u16.min(area.height.saturating_sub(2));
     let dialog = Rect {
         x: area.x + area.width.saturating_sub(dialog_w) / 2,
         y: area.y + area.height.saturating_sub(dialog_h) / 2,
@@ -217,7 +217,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut ConnectDialogState, connecting: b
             Constraint::Length(1), // Password
             Constraint::Length(1), // SSL
             Constraint::Min(0),
-            Constraint::Length(1), // Hints
+            Constraint::Length(2), // Hints (2 lines so narrow terminals don't truncate)
         ])
         .split(inner);
 
@@ -256,16 +256,26 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut ConnectDialogState, connecting: b
         }
     }
 
-    let hint = if connecting {
-        "Esc: cancel"
+    let lines: Vec<Line> = if connecting {
+        vec![Line::from(Span::styled(
+            "Esc: cancel",
+            Style::default().fg(Color::DarkGray),
+        ))]
     } else {
-        "Tab: next   Ctrl+Enter / Enter (on last): connect   Ctrl+Q: quit"
+        vec![
+            Line::from(Span::styled(
+                "Tab/\u{2191}\u{2193}: move fields \u{00b7} Enter/Ctrl+Enter: connect",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(Span::styled(
+                "Ctrl+Q: quit",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ]
     };
-    let hint_paragraph = Paragraph::new(Line::from(Span::styled(
-        hint,
-        Style::default().fg(Color::DarkGray),
-    )))
-    .alignment(Alignment::Center);
+    let hint_paragraph = Paragraph::new(lines)
+        .alignment(Alignment::Center)
+        .wrap(ratatui::widgets::Wrap { trim: false });
     frame.render_widget(hint_paragraph, rows[7]);
 }
 
