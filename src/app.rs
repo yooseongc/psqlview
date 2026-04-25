@@ -386,7 +386,11 @@ impl App {
             }
             KeyCode::BackTab => {
                 if self.focus == FocusPane::Editor {
-                    self.editor.outdent_current_line();
+                    if let Some((s, e)) = self.editor.selected_line_range() {
+                        self.editor.outdent_lines(s, e);
+                    } else {
+                        self.editor.outdent_current_line();
+                    }
                 } else {
                     self.focus = match self.focus {
                         FocusPane::Tree => FocusPane::Results,
@@ -423,8 +427,16 @@ impl App {
     }
 
     /// Opens the autocomplete popup if there's a word prefix at the cursor
-    /// with at least one match, otherwise inserts a 2-space indent.
+    /// with at least one match, otherwise inserts a 2-space indent. If a
+    /// multi-line selection is active, instead block-indents the entire
+    /// selected range.
     fn handle_editor_tab(&mut self) {
+        if let Some((s, e)) = self.editor.selected_line_range() {
+            if e > s {
+                self.editor.indent_lines(s, e);
+                return;
+            }
+        }
         let prefix = self.editor.word_prefix_before_cursor();
         if prefix.is_empty() {
             self.editor.insert_spaces(2);

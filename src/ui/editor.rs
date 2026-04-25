@@ -3,7 +3,14 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Borders};
 use ratatui::Frame;
-use tui_textarea::{Input, Key, Scrolling, TextArea};
+use tui_textarea::{CursorMove, Input, Key, Scrolling, TextArea};
+
+/// Single regex highlighting common SQL keywords. `(?i)` makes it case-
+/// insensitive so users can write `select` or `SELECT` and either gets
+/// the same accent. Keep the alternation list in sync with
+/// [`crate::ui::autocomplete::SQL_KEYWORDS`] when adding or removing
+/// keywords.
+const SQL_KEYWORD_REGEX: &str = r"(?i)\b(SELECT|FROM|WHERE|JOIN|ON|LEFT|RIGHT|INNER|OUTER|FULL|CROSS|GROUP|BY|HAVING|ORDER|LIMIT|OFFSET|INSERT|INTO|VALUES|UPDATE|SET|DELETE|CREATE|TABLE|VIEW|INDEX|DROP|ALTER|ADD|COLUMN|AS|DISTINCT|UNION|ALL|WITH|CASE|WHEN|THEN|ELSE|END|AND|OR|NOT|NULL|IS|IN|LIKE|ILIKE|BETWEEN|EXPLAIN|ANALYZE|RETURNING)\b";
 
 use super::focus_style;
 
@@ -24,6 +31,16 @@ impl EditorState {
         area.set_placeholder_text("-- F5 / Ctrl+Enter to run, Tab = autocomplete");
         area.set_cursor_line_style(Style::default().add_modifier(Modifier::UNDERLINED));
         area.set_style(Style::default().fg(Color::White));
+        // Light syntax highlighting via the regex search facility:
+        // every SQL keyword gets the same cyan/bold accent. Single
+        // pattern, so we can't differentiate keywords from strings or
+        // numbers, but it's a meaningful visual cue for free.
+        let _ = area.set_search_pattern(SQL_KEYWORD_REGEX);
+        area.set_search_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        );
         Self { area }
     }
 
@@ -181,6 +198,80 @@ impl EditorState {
         }
     }
 
+    /// Returns the inclusive `[start_row, end_row]` range covered by the
+    /// active selection, or `None` if no selection is active.
+    pub fn selected_line_range(&self) -> Option<(usize, usize)> {
+        let ((r0, _), (r1, _)) = self.area.selection_range()?;
+        Some((r0, r1))
+    }
+
+    /// Inserts two spaces at the start of every line in the inclusive
+    /// range. Used for block-indent of a selection.
+    pub fn indent_lines(&mut self, start: usize, end: usize) {
+        let total = self.area.lines().len();
+        if total == 0 {
+            return;
+        }
+        let end = end.min(total - 1);
+        for row in start..=end {
+            // Move to head of `row`, insert two spaces.
+            self.move_cursor_to(row, 0);
+            self.area.input(Input {
+                key: Key::Char(' '),
+                ctrl: false,
+                alt: false,
+                shift: false,
+            });
+            self.area.input(Input {
+                key: Key::Char(' '),
+                ctrl: false,
+                alt: false,
+                shift: false,
+            });
+        }
+    }
+
+    /// Removes up to two leading spaces from every line in the inclusive
+    /// range. Lines with no leading whitespace are left alone.
+    pub fn outdent_lines(&mut self, start: usize, end: usize) {
+        let total = self.area.lines().len();
+        if total == 0 {
+            return;
+        }
+        let end = end.min(total - 1);
+        for row in start..=end {
+            let leading = self
+                .area
+                .lines()
+                .get(row)
+                .map(|l| l.chars().take_while(|c| *c == ' ').count())
+                .unwrap_or(0);
+            let remove = leading.min(2);
+            if remove == 0 {
+                continue;
+            }
+            self.move_cursor_to(row, 0);
+            for _ in 0..remove {
+                self.area.input(Input {
+                    key: Key::Delete,
+                    ctrl: false,
+                    alt: false,
+                    shift: false,
+                });
+            }
+        }
+    }
+
+    fn move_cursor_to(&mut self, row: usize, col: usize) {
+        // CursorMove::Jump uses u16 row/col and clamps to buffer bounds.
+        // Cancel any active selection first so callers don't mutate it.
+        self.area.cancel_selection();
+        self.area.move_cursor(CursorMove::Jump(
+            row.try_into().unwrap_or(u16::MAX),
+            col.try_into().unwrap_or(u16::MAX),
+        ));
+    }
+
     /// Removes up to 2 leading spaces from the current line. No-op if the line
     /// has no leading whitespace. Cursor column is clamped to the new line
     /// length if it was inside the removed run.
@@ -308,6 +399,31 @@ mod tests {
         let mut e = EditorState::new();
         e.insert_str("SELECT 1\nFROM t;");
         assert_eq!(e.text(), "SELECT 1\nFROM t;");
+    }
+
+    #[test]
+    fn indent_lines_prepends_two_spaces_per_line() {
+        let mut e = EditorState::new();
+        e.type_text("a\nb\nc");
+        e.indent_lines(0, 2);
+        assert_eq!(e.text(), "  a\n  b\n  c");
+    }
+
+    #[test]
+    fn outdent_lines_removes_up_to_two_leading_spaces_per_line() {
+        let mut e = EditorState::new();
+        e.type_text("    a\n  b\nc");
+        e.outdent_lines(0, 2);
+        assert_eq!(e.text(), "  a\nb\nc");
+    }
+
+    #[test]
+    fn indent_then_outdent_round_trips() {
+        let mut e = EditorState::new();
+        e.type_text("x\ny\nz");
+        e.indent_lines(0, 2);
+        e.outdent_lines(0, 2);
+        assert_eq!(e.text(), "x\ny\nz");
     }
 
     #[test]

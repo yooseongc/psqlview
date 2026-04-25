@@ -31,7 +31,7 @@ rustls-pki-types = "1"
 
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
-tui-textarea = "0.7"
+tui-textarea = { version = "0.7", features = ["search"] }
 unicode-width = "0.2"
 
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
