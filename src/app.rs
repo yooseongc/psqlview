@@ -702,6 +702,15 @@ impl App {
             KeyCode::Backspace => {
                 state.pop_char();
             }
+            KeyCode::Tab => {
+                // Best-effort path completion against the cwd. Quietly
+                // no-ops when the parent directory can't be read or no
+                // entry matches the typed prefix.
+                let cwd = std::env::current_dir().unwrap_or_default();
+                if let Some(completed) = file_prompt::path_complete(&state.input, &cwd) {
+                    state.input = completed;
+                }
+            }
             KeyCode::Char(c)
                 if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
             {

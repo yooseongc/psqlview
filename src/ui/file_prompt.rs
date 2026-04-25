@@ -73,6 +73,108 @@ pub fn resolve(input: &str, cwd: &Path) -> PathBuf {
     }
 }
 
+/// Best-effort path completion for the file prompt. Splits `input` on
+/// the last `/` (or `\\` on Windows) into a parent and a basename
+/// prefix, lists the parent directory, and replaces the basename with
+/// the longest common prefix shared by all matching entries. If
+/// exactly one entry matches and it's a directory, a trailing
+/// separator is appended so the next Tab descends into it.
+///
+/// Returns `None` when the directory can't be read or no entry matches
+/// — the caller leaves the input unchanged in that case.
+pub fn path_complete(input: &str, cwd: &Path) -> Option<String> {
+    let (parent_str, prefix) = split_parent_basename(input);
+    let parent_path = if parent_str.is_empty() {
+        cwd.to_path_buf()
+    } else {
+        let p = PathBuf::from(parent_str);
+        if p.is_absolute() {
+            p
+        } else {
+            cwd.join(p)
+        }
+    };
+
+    let entries = std::fs::read_dir(&parent_path).ok()?;
+    let mut matches: Vec<(String, bool)> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with(prefix) {
+                let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                Some((name, is_dir))
+            } else {
+                None
+            }
+        })
+        .collect();
+    if matches.is_empty() {
+        return None;
+    }
+    matches.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let names: Vec<&str> = matches.iter().map(|(n, _)| n.as_str()).collect();
+    let lcp = longest_common_prefix(&names);
+    let new_basename = if lcp.len() > prefix.len() {
+        lcp.to_string()
+    } else {
+        // No additional characters to commit — return as-is so the
+        // user's input doesn't get mangled. Caller treats this as a
+        // no-op completion.
+        return None;
+    };
+
+    let mut out = if parent_str.is_empty() {
+        new_basename
+    } else {
+        format!("{parent_str}/{new_basename}")
+    };
+    if matches.len() == 1 && matches[0].1 {
+        out.push('/');
+    }
+    Some(out)
+}
+
+fn trim_path_for_title(path: &str, max: usize) -> String {
+    let count = path.chars().count();
+    if count <= max {
+        return path.to_string();
+    }
+    let skip = count - max + 1;
+    let tail: String = path.chars().skip(skip).collect();
+    format!("\u{2026}{tail}")
+}
+
+fn split_parent_basename(input: &str) -> (&str, &str) {
+    match input.rfind(['/', '\\']) {
+        Some(idx) => (&input[..idx], &input[idx + 1..]),
+        None => ("", input),
+    }
+}
+
+fn longest_common_prefix<'a>(strs: &[&'a str]) -> &'a str {
+    if strs.is_empty() {
+        return "";
+    }
+    let first = strs[0];
+    let mut end = first.len();
+    for s in &strs[1..] {
+        end = end.min(s.len());
+        let f = first.as_bytes();
+        let sb = s.as_bytes();
+        let mut i = 0;
+        while i < end && f[i] == sb[i] {
+            i += 1;
+        }
+        end = i;
+    }
+    // Don't slice in the middle of a multi-byte UTF-8 sequence.
+    while end > 0 && !first.is_char_boundary(end) {
+        end -= 1;
+    }
+    &first[..end]
+}
+
 /// Renders the prompt at the bottom of the editor pane, replacing the
 /// last 3 rows (so the editor still shows surrounding context). Caller
 /// passes the editor's full area rect; this widget chooses its own
@@ -89,7 +191,17 @@ pub fn draw(frame: &mut Frame<'_>, state: &FilePromptState, editor_area: Rect) {
         height: h,
     };
 
-    let title = format!(" {}  [Enter \u{00b7} Esc cancel] ", state.mode.label());
+    // Show the cwd in the prompt title so the user knows what relative
+    // paths resolve to. Truncated to the trailing 50 chars to avoid
+    // overflowing the editor border on deep workdirs.
+    let cwd_hint = std::env::current_dir()
+        .map(|p| trim_path_for_title(&p.display().to_string(), 50))
+        .unwrap_or_else(|_| "?".into());
+    let title = format!(
+        " {}  [Tab complete \u{00b7} Enter \u{00b7} Esc cancel]  cwd: {} ",
+        state.mode.label(),
+        cwd_hint
+    );
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
@@ -149,5 +261,92 @@ mod tests {
     fn mode_label_is_human_readable() {
         assert_eq!(FilePromptMode::Open.label(), "Open");
         assert_eq!(FilePromptMode::Save.label(), "Save");
+    }
+
+    fn fresh_dir() -> PathBuf {
+        let id = uuid::Uuid::new_v4();
+        let p = std::env::temp_dir().join(format!("psqlview_pc_{id}"));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn path_complete_extends_unique_prefix_to_full_name() {
+        let dir = fresh_dir();
+        std::fs::write(dir.join("alpha.sql"), "").unwrap();
+        std::fs::write(dir.join("beta.sql"), "").unwrap();
+        let out = path_complete("al", &dir).expect("completion");
+        assert_eq!(out, "alpha.sql");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn path_complete_extends_to_longest_common_prefix() {
+        let dir = fresh_dir();
+        std::fs::write(dir.join("queries_a.sql"), "").unwrap();
+        std::fs::write(dir.join("queries_b.sql"), "").unwrap();
+        let out = path_complete("q", &dir).expect("completion");
+        assert_eq!(out, "queries_");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn path_complete_appends_separator_for_unique_directory_match() {
+        let dir = fresh_dir();
+        std::fs::create_dir(dir.join("subdir")).unwrap();
+        let out = path_complete("sub", &dir).expect("completion");
+        assert_eq!(out, "subdir/");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn path_complete_handles_subdirectory_input() {
+        let dir = fresh_dir();
+        let sub = dir.join("scripts");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("init.sql"), "").unwrap();
+        let out = path_complete("scripts/in", &dir).expect("completion");
+        assert_eq!(out, "scripts/init.sql");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn path_complete_returns_none_when_no_extension_possible() {
+        let dir = fresh_dir();
+        std::fs::write(dir.join("alpha.sql"), "").unwrap();
+        // The user already typed the full name — nothing more to commit.
+        let out = path_complete("alpha.sql", &dir);
+        assert!(out.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn path_complete_returns_none_when_no_match() {
+        let dir = fresh_dir();
+        std::fs::write(dir.join("alpha.sql"), "").unwrap();
+        let out = path_complete("xyz", &dir);
+        assert!(out.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn longest_common_prefix_works_for_short_lists() {
+        assert_eq!(longest_common_prefix(&["foo", "fool", "foobar"]), "foo");
+        assert_eq!(longest_common_prefix(&["abc", "xyz"]), "");
+        assert_eq!(longest_common_prefix(&["only"]), "only");
+        assert_eq!(longest_common_prefix(&[]), "");
+    }
+
+    #[test]
+    fn trim_path_for_title_keeps_short_paths() {
+        assert_eq!(trim_path_for_title("/short", 50), "/short");
+    }
+
+    #[test]
+    fn trim_path_for_title_truncates_with_ellipsis_marker() {
+        let long = "/".repeat(60);
+        let out = trim_path_for_title(&long, 20);
+        assert!(out.starts_with('\u{2026}'));
+        assert_eq!(out.chars().count(), 20);
     }
 }
