@@ -5,6 +5,7 @@ use std::time::Duration;
 use anyhow::Context;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -85,12 +86,28 @@ fn setup_terminal() -> anyhow::Result<Tui> {
         EnableBracketedPaste
     )
     .context("enter alternate screen")?;
+    // Best-effort: push the kitty keyboard protocol flags so terminals
+    // that support it (kitty, foot, ghostty, recent wezterm / alacritty)
+    // disambiguate Ctrl+Enter, Ctrl+I (vs Tab), Shift+Enter, etc. — the
+    // standard VT protocol collapses all of those onto plain Enter / Tab.
+    // Terminals that don't support the protocol will respond with an
+    // error; we silently ignore it and fall back to F5 / etc.
+    let _ = execute!(
+        stdout,
+        PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+        )
+    );
     let backend = CrosstermBackend::new(stdout);
     Terminal::new(backend).context("construct terminal")
 }
 
 fn restore_terminal(terminal: &mut Tui) -> anyhow::Result<()> {
     disable_raw_mode().ok();
+    // Match the push from setup_terminal — pop is a no-op on terminals
+    // where the push didn't take effect.
+    let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
     execute!(
         terminal.backend_mut(),
         DisableBracketedPaste,
@@ -107,6 +124,7 @@ fn install_panic_hook() {
     panic::set_hook(Box::new(move |info| {
         // Best-effort terminal restoration so the panic message is readable.
         let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
         let _ = execute!(
             io::stdout(),
             DisableBracketedPaste,

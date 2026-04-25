@@ -442,8 +442,15 @@ impl App {
             return;
         }
 
-        // Ctrl+Enter runs the current query regardless of focus.
-        if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Enter) {
+        // Ctrl+Enter runs the current query regardless of focus. Some
+        // terminals deliver this as Ctrl+J (the literal LF character)
+        // because the standard VT protocol can't distinguish Ctrl+Enter
+        // from Enter — we accept both so the shortcut works without
+        // requiring kitty keyboard protocol support.
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && (matches!(key.code, KeyCode::Enter)
+                || matches!(key.code, KeyCode::Char('j') | KeyCode::Char('J')))
+        {
             self.run_current_query();
             return;
         }
@@ -1377,6 +1384,25 @@ mod tests {
         // history push. The original last_run_sql is preserved (the
         // DDL placeholder would only be written if a session existed).
         assert_eq!(app.last_run_sql.as_deref(), Some("SELECT 1"));
+    }
+
+    #[test]
+    fn ctrl_j_runs_query_as_ctrl_enter_alias() {
+        // Without a session run_current_query is a no-op, but the early-
+        // return path still consumes the key — verify the editor isn't
+        // mutated.
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        type_str(&mut app, "SELECT 1");
+        let before = app.editor.text();
+        app.on_event(AppEvent::Key(key(
+            KeyCode::Char('j'),
+            KeyModifiers::CONTROL,
+        )));
+        // Editor unchanged — the Ctrl+J was treated as Ctrl+Enter, not
+        // a literal char insertion.
+        assert_eq!(app.editor.text(), before);
     }
 
     #[test]
