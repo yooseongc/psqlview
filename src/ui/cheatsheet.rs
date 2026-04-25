@@ -42,6 +42,10 @@ const ROWS: &[(&str, &str)] = &[
     ("Left Right / hl", "column scroll"),
     ("Ctrl+Left / Ctrl+Right", "first / last column"),
     ("Enter", "row detail view"),
+    (
+        "s",
+        "sort by leftmost visible column (Asc \u{2192} Desc \u{2192} off)",
+    ),
     ("", ""),
     ("Row detail modal", ""),
     ("Up Down / jk", "scroll"),

@@ -187,6 +187,28 @@ impl EditorState {
         self.insert_str(s);
     }
 
+    /// Moves the cursor to the 1-based character position used by Postgres
+    /// error reports. Counts characters across newlines. Returns `true` if
+    /// the position was inside the buffer, `false` if it fell off the end
+    /// (cursor not moved).
+    pub fn move_cursor_to_char_position(&mut self, position_1based: u32) -> bool {
+        let target = match (position_1based as usize).checked_sub(1) {
+            Some(n) => n,
+            None => return false,
+        };
+        let mut acc = 0usize;
+        for (line_idx, line) in self.area.lines().iter().enumerate() {
+            let line_chars = line.chars().count();
+            if target <= acc + line_chars {
+                let col = target - acc;
+                self.move_cursor_to(line_idx, col);
+                return true;
+            }
+            acc += line_chars + 1; // +1 for the newline
+        }
+        false
+    }
+
     pub fn insert_spaces(&mut self, n: usize) {
         for _ in 0..n {
             self.area.input(Input {
@@ -399,6 +421,34 @@ mod tests {
         let mut e = EditorState::new();
         e.insert_str("SELECT 1\nFROM t;");
         assert_eq!(e.text(), "SELECT 1\nFROM t;");
+    }
+
+    #[test]
+    fn move_cursor_to_char_position_handles_single_line() {
+        let mut e = EditorState::new();
+        e.type_text("SELECT 1 FROM nope");
+        // 'n' of "nope" is at 1-based char 15.
+        assert!(e.move_cursor_to_char_position(15));
+        assert_eq!(e.cursor_line_col(), (1, 15));
+    }
+
+    #[test]
+    fn move_cursor_to_char_position_handles_multi_line() {
+        let mut e = EditorState::new();
+        e.type_text("SELECT 1\nFROM bad");
+        // 'b' of "bad" — "SELECT 1\n" is 9 chars (incl newline), then
+        // 'F' = 10, 'R' = 11, 'O' = 12, 'M' = 13, ' ' = 14, 'b' = 15.
+        assert!(e.move_cursor_to_char_position(15));
+        let (ln, col) = e.cursor_line_col();
+        assert_eq!(ln, 2);
+        assert_eq!(col, 6);
+    }
+
+    #[test]
+    fn move_cursor_to_char_position_returns_false_when_out_of_range() {
+        let mut e = EditorState::new();
+        e.type_text("abc");
+        assert!(!e.move_cursor_to_char_position(99));
     }
 
     #[test]

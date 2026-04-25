@@ -741,6 +741,11 @@ impl App {
                 let sql = self.last_run_sql.as_deref().unwrap_or("");
                 let detailed = err.format_detailed_with_sql(sql);
                 tracing::warn!(error = %detailed, "query failed");
+                // Jump the editor caret to the offending position so the
+                // user can start typing the fix without hunting for it.
+                if let Some(pos) = err.original_position() {
+                    self.editor.move_cursor_to_char_position(pos);
+                }
                 self.query_status = QueryStatus::Failed(detailed.clone());
                 self.results.clear();
                 self.toast_error(detailed);

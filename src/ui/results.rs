@@ -7,7 +7,7 @@ use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::QueryStatus;
-use crate::types::{ColumnMeta, ResultSet};
+use crate::types::{CellValue, ColumnMeta, ResultSet};
 
 use super::focus_style;
 
@@ -22,12 +22,32 @@ pub struct ResultsState {
     /// Last rendered visible data-row count. Updated each frame so PageUp/
     /// PageDown can step by a screenful instead of a fixed 20.
     pub visible_rows: usize,
+    /// Active client-side sort, if any. Pressing `s` cycles through
+    /// Asc → Desc → off for the leftmost visible column.
+    pub sort: Option<SortState>,
+    /// Snapshot of `current.rows` taken before the first sort, used to
+    /// restore original order when the sort cycles back to off.
+    original_rows: Option<Vec<Vec<crate::types::CellValue>>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SortState {
+    pub col: usize,
+    pub dir: SortDir,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortDir {
+    Asc,
+    Desc,
 }
 
 impl ResultsState {
     pub fn set_result(&mut self, result: ResultSet) {
         self.selected_row = 0;
         self.x_offset = 0;
+        self.sort = None;
+        self.original_rows = None;
         self.current = Some(result);
     }
 
@@ -35,6 +55,63 @@ impl ResultsState {
         self.current = None;
         self.selected_row = 0;
         self.x_offset = 0;
+        self.sort = None;
+        self.original_rows = None;
+    }
+
+    /// Cycles the sort on the leftmost visible column: off → Asc → Desc
+    /// → off. Sorting is client-side; the underlying ResultSet's row
+    /// vector is mutated, with the pre-sort order remembered so the
+    /// "off" state can restore it.
+    pub fn cycle_sort_on_current_column(&mut self) {
+        let Some(set) = self.current.as_mut() else {
+            return;
+        };
+        if set.columns.is_empty() {
+            return;
+        }
+        let col = self.x_offset.min(set.columns.len() - 1);
+        let next = match self.sort {
+            None => Some(SortState {
+                col,
+                dir: SortDir::Asc,
+            }),
+            Some(s) if s.col != col => Some(SortState {
+                col,
+                dir: SortDir::Asc,
+            }),
+            Some(SortState {
+                dir: SortDir::Asc, ..
+            }) => Some(SortState {
+                col,
+                dir: SortDir::Desc,
+            }),
+            Some(SortState {
+                dir: SortDir::Desc, ..
+            }) => None,
+        };
+        if self.original_rows.is_none() {
+            self.original_rows = Some(set.rows.clone());
+        }
+        match next {
+            Some(s) => {
+                set.rows.sort_by(|a, b| {
+                    let cmp = compare_cells(a.get(s.col), b.get(s.col));
+                    match s.dir {
+                        SortDir::Asc => cmp,
+                        SortDir::Desc => cmp.reverse(),
+                    }
+                });
+                self.sort = Some(s);
+            }
+            None => {
+                if let Some(orig) = self.original_rows.clone() {
+                    set.rows = orig;
+                }
+                self.sort = None;
+            }
+        }
+        self.selected_row = 0;
     }
 
     pub fn begin_running(&mut self) {
@@ -102,8 +179,40 @@ impl ResultsState {
                     self.x_offset += 1;
                 }
             }
+            KeyCode::Char('s') => self.cycle_sort_on_current_column(),
             _ => {}
         }
+    }
+}
+
+/// Type-aware ordering for `CellValue` so client-side sort behaves
+/// sensibly. Same-type variants get their natural ordering; mixed
+/// numeric (Int vs Float) gets coerced to f64; nulls sort last; any
+/// other mix falls back to the textual `Display` form.
+fn compare_cells(a: Option<&CellValue>, b: Option<&CellValue>) -> std::cmp::Ordering {
+    use std::cmp::Ordering::*;
+    use CellValue::*;
+    match (a, b) {
+        (None, None) => Equal,
+        (None, _) => Greater,
+        (_, None) => Less,
+        (Some(Null), Some(Null)) => Equal,
+        (Some(Null), _) => Greater,
+        (_, Some(Null)) => Less,
+        (Some(Bool(x)), Some(Bool(y))) => x.cmp(y),
+        (Some(Int(x)), Some(Int(y))) => x.cmp(y),
+        (Some(Float(x)), Some(Float(y))) => x.partial_cmp(y).unwrap_or(Equal),
+        (Some(Numeric(x)), Some(Numeric(y))) => x.cmp(y),
+        (Some(Int(x)), Some(Float(y))) => (*x as f64).partial_cmp(y).unwrap_or(Equal),
+        (Some(Float(x)), Some(Int(y))) => x.partial_cmp(&(*y as f64)).unwrap_or(Equal),
+        (Some(Date(x)), Some(Date(y))) => x.cmp(y),
+        (Some(Time(x)), Some(Time(y))) => x.cmp(y),
+        (Some(Timestamp(x)), Some(Timestamp(y))) => x.cmp(y),
+        (Some(TimestampTz(x)), Some(TimestampTz(y))) => x.cmp(y),
+        (Some(Text(x)), Some(Text(y))) => x.cmp(y),
+        (Some(Json(x)), Some(Json(y))) => x.cmp(y),
+        (Some(Bytes(x)), Some(Bytes(y))) => x.cmp(y),
+        (Some(x), Some(y)) => x.to_string().cmp(&y.to_string()),
     }
 }
 
@@ -188,12 +297,31 @@ fn draw_table(
     let header = Row::new(
         set.columns[state.x_offset..state.x_offset + visible_cols]
             .iter()
-            .map(|c| {
+            .enumerate()
+            .map(|(i, c)| {
+                let abs = state.x_offset + i;
+                let arrow = match state.sort {
+                    Some(SortState {
+                        col,
+                        dir: SortDir::Asc,
+                    }) if col == abs => " \u{2191}",
+                    Some(SortState {
+                        col,
+                        dir: SortDir::Desc,
+                    }) if col == abs => " \u{2193}",
+                    _ => "",
+                };
                 Cell::from(Line::from(vec![
                     Span::styled(
                         c.name.clone(),
                         Style::default()
                             .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        arrow.to_string(),
+                        Style::default()
+                            .fg(Color::Yellow)
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
@@ -441,6 +569,39 @@ mod tests {
         s.selected_row = 5;
         s.handle_key(key(KeyCode::PageUp));
         assert_eq!(s.selected_row, 0);
+    }
+
+    #[test]
+    fn sort_cycles_asc_desc_off() {
+        let mut s = ResultsState::default();
+        s.set_result(sample_result());
+        // Three rows: ints 1, 2, 3 in column a.
+        s.cycle_sort_on_current_column();
+        let cur = s.current.as_ref().unwrap();
+        assert!(matches!(cur.rows[0][0], CellValue::Int(1)));
+        assert_eq!(s.sort.unwrap().dir, SortDir::Asc);
+        s.cycle_sort_on_current_column();
+        let cur = s.current.as_ref().unwrap();
+        assert!(matches!(cur.rows[0][0], CellValue::Int(3)));
+        assert_eq!(s.sort.unwrap().dir, SortDir::Desc);
+        s.cycle_sort_on_current_column();
+        let cur = s.current.as_ref().unwrap();
+        // Off → restored to original (1, 2, 3).
+        assert!(matches!(cur.rows[0][0], CellValue::Int(1)));
+        assert!(s.sort.is_none());
+    }
+
+    #[test]
+    fn sort_on_different_column_starts_asc() {
+        let mut s = ResultsState::default();
+        s.set_result(sample_result());
+        s.cycle_sort_on_current_column();
+        s.cycle_sort_on_current_column(); // Desc on col 0
+        s.x_offset = 1;
+        s.cycle_sort_on_current_column(); // Asc on col 1
+        let st = s.sort.unwrap();
+        assert_eq!(st.col, 1);
+        assert_eq!(st.dir, SortDir::Asc);
     }
 
     #[test]

@@ -37,6 +37,20 @@ impl DbError {
         }
     }
 
+    /// Returns the 1-based character position reported by Postgres for
+    /// this error, when present. Used to jump the editor caret to where
+    /// the user needs to fix.
+    pub fn original_position(&self) -> Option<u32> {
+        let DbError::Query(e) = self else {
+            return None;
+        };
+        let db = e.as_db_error()?;
+        match db.position()? {
+            tokio_postgres::error::ErrorPosition::Original(p) => Some(*p),
+            tokio_postgres::error::ErrorPosition::Internal { .. } => None,
+        }
+    }
+
     /// Same as `format_detailed` but, when the error has a POSITION, appends
     /// a snippet of the offending SQL with a caret pointing at it.
     pub fn format_detailed_with_sql(&self, sql: &str) -> String {
