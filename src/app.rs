@@ -13,6 +13,7 @@ use crate::ui::autocomplete::{AutocompletePopup, SQL_KEYWORDS};
 use crate::ui::connect_dialog::ConnectDialogState;
 use crate::ui::editor::EditorState;
 use crate::ui::results::ResultsState;
+use crate::ui::row_detail::RowDetailState;
 use crate::ui::schema_tree::SchemaTreeState;
 use crate::ui::PaneRects;
 
@@ -82,6 +83,13 @@ pub struct App {
 
     pub autocomplete: Option<AutocompletePopup>,
 
+    /// Modal overlay showing every column of the currently-selected result
+    /// row. Opened by Enter on the Results pane.
+    pub row_detail: RowDetailState,
+
+    /// Whether the keybinding cheatsheet overlay is visible.
+    pub cheatsheet_open: bool,
+
     /// SQL of the most recently executed query. Retained so error renderers
     /// can place a caret at the reported POSITION.
     pub last_run_sql: Option<String>,
@@ -116,6 +124,8 @@ impl App {
             query_status: QueryStatus::Idle,
             connecting: false,
             autocomplete: None,
+            row_detail: RowDetailState::default(),
+            cheatsheet_open: false,
             last_run_sql: None,
             history: VecDeque::new(),
             history_cursor: None,
@@ -219,6 +229,42 @@ impl App {
         // Global hotkeys first. Ctrl+C / Ctrl+Q quit unconditionally.
         if is_ctrl_c(&key) || is_ctrl_q(&key) {
             self.should_quit = true;
+            return;
+        }
+
+        // Modal overlays capture keys before any pane does.
+        if self.cheatsheet_open {
+            match key.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('?') | KeyCode::Char('q') => {
+                    self.cheatsheet_open = false;
+                }
+                _ => {}
+            }
+            return;
+        }
+        if self.row_detail.open {
+            match key.code {
+                KeyCode::Esc | KeyCode::Enter => self.row_detail.close(),
+                KeyCode::Up | KeyCode::Char('k') => self.row_detail.scroll_up(1),
+                KeyCode::Down | KeyCode::Char('j') => self.row_detail.scroll_down(1),
+                KeyCode::PageUp => self.row_detail.scroll_up(10),
+                KeyCode::PageDown => self.row_detail.scroll_down(10),
+                _ => {}
+            }
+            return;
+        }
+        // F1 anywhere opens the cheatsheet. `?` also opens it, but only
+        // outside contexts that swallow the character (editor, search,
+        // autocomplete — those treat it as typed input).
+        let help_via_slash = matches!(key.code, KeyCode::Char('?'))
+            && !self.connecting
+            && !matches!(self.query_status, QueryStatus::Running { .. })
+            && self.tree.search.is_none()
+            && self.autocomplete.is_none()
+            && !(self.focus == FocusPane::Editor && self.screen == Screen::Workspace);
+        let help_via_f1 = matches!(key.code, KeyCode::F(1));
+        if help_via_slash || help_via_f1 {
+            self.cheatsheet_open = true;
             return;
         }
         // Esc dismisses a visible toast immediately before anything else
@@ -357,7 +403,21 @@ impl App {
                     self.history_cursor = None;
                 }
                 FocusPane::Tree => self.on_key_tree(key),
-                FocusPane::Results => self.results.handle_key(key),
+                FocusPane::Results => {
+                    // Enter on a populated result opens the per-row
+                    // detail modal, bypassing the Results handler.
+                    if matches!(key.code, KeyCode::Enter)
+                        && self
+                            .results
+                            .current
+                            .as_ref()
+                            .is_some_and(|s| !s.rows.is_empty())
+                    {
+                        self.row_detail.open();
+                    } else {
+                        self.results.handle_key(key);
+                    }
+                }
             },
         }
     }

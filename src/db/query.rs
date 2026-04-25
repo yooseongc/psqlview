@@ -130,6 +130,9 @@ fn convert_cell(row: &Row, idx: usize, ty: &Type) -> CellValue {
             Ok(None) => CellValue::Null,
             Err(_) => CellValue::Unsupported(name.clone()),
         },
+        Type::INET => opt!(std::net::IpAddr, |v: std::net::IpAddr| CellValue::Text(
+            v.to_string()
+        )),
         _ => CellValue::Unsupported(name),
     }
 }

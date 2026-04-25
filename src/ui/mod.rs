@@ -1,7 +1,9 @@
 pub mod autocomplete;
+pub mod cheatsheet;
 pub mod connect_dialog;
 pub mod editor;
 pub mod results;
+pub mod row_detail;
 pub mod schema_tree;
 pub mod status;
 
@@ -18,6 +20,19 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     match app.screen {
         Screen::Connect => draw_connect(frame, app, area),
         Screen::Workspace => draw_workspace(frame, app, area),
+    }
+
+    if let Some(result) = app.results.current.as_ref() {
+        row_detail::draw(
+            frame,
+            &app.row_detail,
+            result,
+            app.results.selected_row,
+            area,
+        );
+    }
+    if app.cheatsheet_open {
+        cheatsheet::draw(frame, area);
     }
 
     if let Some(toast) = app.toast.as_ref() {

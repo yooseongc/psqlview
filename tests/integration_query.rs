@@ -105,24 +105,20 @@ async fn convert_cell_covers_all_supported_types() {
     );
     assert!(matches!(vals[16], CellValue::Bytes(3)));
     assert!(
-        matches!(&vals[17], CellValue::Unsupported(name) if name == "inet"),
+        matches!(&vals[17], CellValue::Text(s) if s == "10.0.0.1"),
         "inet: {:?}",
         vals[17]
     );
 
     // id=2 row: every supported column is NULL (except id itself).
-    // The unsupported `inet` column at index 17 is rendered as
-    // `Unsupported("inet")` regardless of NULL — convert_cell's fallthrough
-    // does not introspect the wire-level null bit for unknown types.
     let nulls = &set.rows[1];
     assert!(matches!(nulls[0], CellValue::Int(2)));
-    for (i, cell) in nulls.iter().enumerate().skip(1).take(16) {
+    for (i, cell) in nulls.iter().enumerate().skip(1) {
         assert!(
             matches!(cell, CellValue::Null),
             "col {i} should be Null, got {cell:?}"
         );
     }
-    assert!(matches!(&nulls[17], CellValue::Unsupported(name) if name == "inet"));
 }
 
 #[tokio::test]
