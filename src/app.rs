@@ -42,6 +42,28 @@ fn build_preview_sql(schema: &str, relation: &str, limit: u32) -> String {
     )
 }
 
+/// Renders a cell for clipboard / TSV copy. Mirrors the Display impl
+/// of `CellValue` except NULL becomes the empty string (so a row with
+/// nulls round-trips through a paste cleanly).
+fn format_cell_for_copy(v: &crate::types::CellValue) -> String {
+    match v {
+        crate::types::CellValue::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+/// Truncates `s` to `max` chars + "…" so toast messages don't grow
+/// unboundedly when the user copies a long cell.
+fn truncate_for_toast(s: &str, max: usize) -> String {
+    let count = s.chars().count();
+    if count <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push('…');
+    out
+}
+
 /// Wraps a multi-line DDL string in a synthetic single-column `ResultSet`
 /// so the existing results pane can render and scroll it like any other
 /// query output.
@@ -499,6 +521,19 @@ impl App {
                 }
                 FocusPane::Tree => self.on_key_tree(key),
                 FocusPane::Results => {
+                    // y / Y copy via OSC 52 to the host terminal's clipboard.
+                    // Routed before results.handle_key so the keys don't fall
+                    // through to a future scroll binding.
+                    if key.modifiers.is_empty() && matches!(key.code, KeyCode::Char('y')) {
+                        self.copy_current_cell_to_clipboard();
+                        return;
+                    }
+                    if key.modifiers == KeyModifiers::SHIFT
+                        && matches!(key.code, KeyCode::Char('Y'))
+                    {
+                        self.copy_current_row_to_clipboard();
+                        return;
+                    }
                     // Enter on a populated result opens the per-row
                     // detail modal, bypassing the Results handler.
                     if matches!(key.code, KeyCode::Enter)
@@ -973,6 +1008,55 @@ impl App {
         }
     }
 
+    /// Copies the cell at (`selected_row`, leftmost-visible-column) into
+    /// the host terminal's clipboard via OSC 52.
+    fn copy_current_cell_to_clipboard(&mut self) {
+        let Some(text) = self.format_current_cell() else {
+            self.toast_info("no cell to copy".into());
+            return;
+        };
+        match crate::ui::clipboard::copy(&text) {
+            Ok(()) => self.toast_info(format!("copied: {}", truncate_for_toast(&text, 40))),
+            Err(e) => self.toast_error(format!("copy failed: {e}")),
+        }
+    }
+
+    /// Copies the entire selected row as TSV (cells joined by `\t`).
+    fn copy_current_row_to_clipboard(&mut self) {
+        let Some(text) = self.format_current_row_as_tsv() else {
+            self.toast_info("no row to copy".into());
+            return;
+        };
+        match crate::ui::clipboard::copy(&text) {
+            Ok(()) => self.toast_info("row copied".into()),
+            Err(e) => self.toast_error(format!("copy failed: {e}")),
+        }
+    }
+
+    fn format_current_cell(&self) -> Option<String> {
+        let rs = self.results.current.as_ref()?;
+        if rs.rows.is_empty() || rs.columns.is_empty() {
+            return None;
+        }
+        let row = rs.rows.get(self.results.selected_row)?;
+        let col = self.results.x_offset.min(row.len().saturating_sub(1));
+        Some(format_cell_for_copy(row.get(col)?))
+    }
+
+    fn format_current_row_as_tsv(&self) -> Option<String> {
+        let rs = self.results.current.as_ref()?;
+        if rs.rows.is_empty() {
+            return None;
+        }
+        let row = rs.rows.get(self.results.selected_row)?;
+        Some(
+            row.iter()
+                .map(format_cell_for_copy)
+                .collect::<Vec<_>>()
+                .join("\t"),
+        )
+    }
+
     /// Fetches a synthetic `CREATE TABLE` (plus index) DDL for the
     /// selected relation and routes the text into the results pane as a
     /// single-column `ddl` result. Reuses the query lifecycle so the
@@ -1158,6 +1242,55 @@ mod tests {
         assert_eq!(quote_ident("users"), r#""users""#);
         assert_eq!(quote_ident("My\"Table"), r#""My""Table""#);
         assert_eq!(quote_ident("WITH"), r#""WITH""#);
+    }
+
+    #[test]
+    fn format_cell_for_copy_renders_null_as_empty_string() {
+        use crate::types::CellValue;
+        assert_eq!(format_cell_for_copy(&CellValue::Null), "");
+        assert_eq!(format_cell_for_copy(&CellValue::Int(42)), "42");
+        assert_eq!(format_cell_for_copy(&CellValue::Text("hi".into())), "hi");
+    }
+
+    #[test]
+    fn truncate_for_toast_caps_long_strings_with_ellipsis() {
+        assert_eq!(truncate_for_toast("short", 40), "short");
+        let long = "a".repeat(50);
+        let out = truncate_for_toast(&long, 10);
+        assert_eq!(out.chars().count(), 11); // 10 chars + ellipsis
+        assert!(out.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn copy_helpers_format_cell_and_row_correctly() {
+        use crate::types::{CellValue, ColumnMeta};
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.results.set_result(ResultSet {
+            columns: vec![
+                ColumnMeta {
+                    name: "id".into(),
+                    type_name: "int".into(),
+                },
+                ColumnMeta {
+                    name: "name".into(),
+                    type_name: "text".into(),
+                },
+            ],
+            rows: vec![
+                vec![CellValue::Int(7), CellValue::Text("alice".into())],
+                vec![CellValue::Int(8), CellValue::Null],
+            ],
+            ..ResultSet::default()
+        });
+        app.results.selected_row = 1;
+        // x_offset 0 means "id" is leftmost visible.
+        app.results.x_offset = 0;
+        assert_eq!(app.format_current_cell().as_deref(), Some("8"));
+        assert_eq!(app.format_current_row_as_tsv().as_deref(), Some("8\t"));
+        // Move x_offset → cell follows the leftmost visible column.
+        app.results.x_offset = 1;
+        assert_eq!(app.format_current_cell().as_deref(), Some(""));
     }
 
     #[test]

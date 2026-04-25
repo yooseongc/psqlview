@@ -48,6 +48,7 @@ const ROWS: &[(&str, &str)] = &[
     ("Left Right / hl", "column scroll"),
     ("Ctrl+Left / Ctrl+Right", "first / last column"),
     ("Ctrl+E", "export current result set to CSV"),
+    ("y / Y", "copy current cell / row (OSC 52 clipboard)"),
     ("Enter", "row detail view"),
     (
         "s",

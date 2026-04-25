@@ -1,6 +1,7 @@
 pub mod autocomplete;
 pub mod autocomplete_context;
 pub mod cheatsheet;
+pub mod clipboard;
 pub mod connect_dialog;
 pub mod csv_export;
 pub mod editor;
