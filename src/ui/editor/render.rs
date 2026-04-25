@@ -1,9 +1,7 @@
 //! Renders the editor pane: optional Block frame, line numbers in the
-//! gutter, cursor-line underline, selection highlight, and a real
-//! terminal caret via `Frame::set_cursor_position`.
-//!
-//! R1 ships single-color text. R2 will replace `style_for_line` with
-//! token-styled spans from the SQL lexer.
+//! gutter, per-token syntax color, selection highlight, cursor-line
+//! underline, bracket-pair reverse-video highlight, and a real terminal
+//! caret via `Frame::set_cursor_position`.
 
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -12,6 +10,7 @@ use ratatui::widgets::{Block, Paragraph};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
+use super::bracket;
 use super::buffer::{Cursor, TextBuffer};
 use crate::ui::sql_lexer::{tokenize_line, LexState, TokenKind};
 
@@ -66,6 +65,14 @@ pub fn draw(
 
     let selection = buf.selection_range();
     let cursor = buf.cursor();
+    // Bracket-pair highlight: only when the editor has focus, no selection
+    // is active, and the cursor sits on a paired bracket. We require focus
+    // because the highlight is anchored to the visible caret.
+    let match_pair = if focused && selection.is_none() {
+        bracket::find_match(buf, cursor).map(|m| (cursor, m))
+    } else {
+        None
+    };
 
     // Empty + placeholder.
     if buf.is_empty() {
@@ -113,7 +120,8 @@ pub fn draw(
             Style::default().fg(Color::DarkGray),
         ));
 
-        // Body content: per-token color + selection bg + cursor-line underline.
+        // Body content: per-token color + selection bg + cursor-line underline
+        // + bracket-pair highlight.
         push_styled_line(
             &mut spans,
             raw,
@@ -121,6 +129,7 @@ pub fn draw(
             &mut lex_state,
             selection,
             focused && row == cursor.row,
+            match_pair,
         );
 
         frame_lines.push(Line::from(spans));
@@ -145,7 +154,8 @@ pub fn draw(
 
 /// Builds the content portion of a line: tokenizes for syntax color,
 /// overlays the selection background, optionally adds underline for the
-/// cursor line, and merges adjacent same-style chars into Spans.
+/// cursor line and reverse-video for matched brackets, and merges adjacent
+/// same-style chars into Spans.
 fn push_styled_line(
     spans: &mut Vec<Span<'static>>,
     line: &str,
@@ -153,13 +163,38 @@ fn push_styled_line(
     lex_state: &mut LexState,
     selection: Option<(Cursor, Cursor)>,
     cursor_line: bool,
+    match_pair: Option<(Cursor, Cursor)>,
 ) {
     let chars: Vec<char> = line.chars().collect();
+    let styles = compute_line_styles(line, row, lex_state, selection, cursor_line, match_pair);
     let n = chars.len();
+    let mut i = 0;
+    while i < n {
+        let s = styles[i];
+        let start = i;
+        while i < n && styles[i] == s {
+            i += 1;
+        }
+        let text: String = chars[start..i].iter().collect();
+        spans.push(Span::styled(text, s));
+    }
+}
 
-    // 1. Per-char foreground style from the tokenizer.
+/// Per-character style vector for one rendered line. Pure function so
+/// it can be unit-tested without spinning up a ratatui frame.
+fn compute_line_styles(
+    line: &str,
+    row: usize,
+    lex_state: &mut LexState,
+    selection: Option<(Cursor, Cursor)>,
+    cursor_line: bool,
+    match_pair: Option<(Cursor, Cursor)>,
+) -> Vec<Style> {
+    let n = line.chars().count();
     let default_style = Style::default().fg(Color::White);
     let mut styles: Vec<Style> = vec![default_style; n];
+
+    // 1. Per-char foreground style from the tokenizer.
     let tokens = tokenize_line(line, lex_state);
     for tok in &tokens {
         let s = style_for_kind(tok.kind);
@@ -189,17 +224,17 @@ fn push_styled_line(
         }
     }
 
-    // 4. Merge adjacent same-style runs into Spans.
-    let mut i = 0;
-    while i < n {
-        let s = styles[i];
-        let start = i;
-        while i < n && styles[i] == s {
-            i += 1;
+    // 4. Bracket-pair highlight via reverse video — keeps the underlying
+    // token color but flips fg/bg so the pair pops out regardless of theme.
+    if let Some((a, b)) = match_pair {
+        for pos in [a, b] {
+            if pos.row == row && pos.col < n {
+                styles[pos.col] = styles[pos.col].add_modifier(Modifier::REVERSED);
+            }
         }
-        let text: String = chars[start..i].iter().collect();
-        spans.push(Span::styled(text, s));
     }
+
+    styles
 }
 
 fn style_for_kind(kind: TokenKind) -> Style {
@@ -327,5 +362,38 @@ mod tests {
         let e = Cursor::new(4, 2);
         let (lo, hi) = row_selection_range(3, s, e, 8);
         assert_eq!((lo, hi), (Some(0), Some(8)));
+    }
+
+    #[test]
+    fn bracket_match_marks_both_positions_reversed() {
+        let line = "SELECT (a + b) FROM t";
+        let mut lex = LexState::default();
+        let pair = Some((Cursor::new(0, 7), Cursor::new(0, 13)));
+        let styles = compute_line_styles(line, 0, &mut lex, None, false, pair);
+        assert!(styles[7].add_modifier.contains(Modifier::REVERSED));
+        assert!(styles[13].add_modifier.contains(Modifier::REVERSED));
+        assert!(!styles[8].add_modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn bracket_match_only_applies_to_matching_row() {
+        let line = "a)";
+        let mut lex = LexState::default();
+        // Pair spans rows 0 and 2; rendering row 2 should mark only col 0.
+        let pair = Some((Cursor::new(0, 7), Cursor::new(2, 0)));
+        let styles = compute_line_styles(line, 2, &mut lex, None, false, pair);
+        assert!(styles[0].add_modifier.contains(Modifier::REVERSED));
+        assert!(!styles[1].add_modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn bracket_match_none_leaves_styles_untouched() {
+        let line = "SELECT 1";
+        let mut lex = LexState::default();
+        let with = compute_line_styles(line, 0, &mut lex, None, false, None);
+        let mut lex2 = LexState::default();
+        let pair = Some((Cursor::new(99, 0), Cursor::new(99, 1)));
+        let without = compute_line_styles(line, 0, &mut lex2, None, false, pair);
+        assert_eq!(with, without);
     }
 }

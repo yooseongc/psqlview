@@ -6,6 +6,7 @@
 //! the legacy implementation so call sites in `app.rs` and the integration
 //! tests don't have to change.
 
+pub mod bracket;
 pub mod buffer;
 pub mod edit;
 pub mod render;
