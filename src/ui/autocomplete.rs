@@ -91,6 +91,23 @@ impl AutocompletePopup {
         })
     }
 
+    /// Opens the popup with no prefix filter — every candidate shows.
+    /// Used when the surrounding clause already narrows the candidate
+    /// list (e.g. cursor right after `qualifier.`, where the column
+    /// list is short enough to scroll without filtering).
+    pub fn open_anywhere(all: Vec<String>) -> Option<Self> {
+        if all.is_empty() {
+            return None;
+        }
+        let filtered = all.clone();
+        Some(Self {
+            prefix: String::new(),
+            all,
+            filtered,
+            selected: 0,
+        })
+    }
+
     pub fn extend_prefix(&mut self, c: char) {
         self.prefix.push(c);
         self.recompute();

@@ -588,19 +588,32 @@ impl App {
             }
         }
         let prefix = self.editor.word_prefix_before_cursor();
-        if prefix.is_empty() {
+        let lines = self.editor.lines();
+        let (row, col) = self.editor.cursor_pos();
+        let ctx = detect_context(lines, row, col);
+        // The popup opens with no prefix when the surrounding clause
+        // already narrows the candidate list (after `FROM ` or
+        // `qualifier.`), so the user doesn't have to type a starting
+        // letter to discover what's available.
+        let context_narrows = !matches!(ctx, CompletionContext::Default);
+        if prefix.is_empty() && !context_narrows {
             self.editor.insert_spaces(2);
             return;
         }
-        let candidates = self.completion_candidates();
-        match AutocompletePopup::open(prefix, candidates) {
+        let candidates = self.candidates_for_context(&ctx);
+        let popup = if prefix.is_empty() {
+            AutocompletePopup::open_anywhere(candidates)
+        } else {
+            AutocompletePopup::open(prefix, candidates)
+        };
+        match popup {
             Some(popup) => self.autocomplete = Some(popup),
             None => self.editor.insert_spaces(2),
         }
     }
 
-    /// Builds the candidate pool for the autocomplete popup. The list is
-    /// narrowed by the cursor's surrounding clause:
+    /// Builds the candidate pool for a known cursor context. Narrowing
+    /// rules:
     ///
     /// - After `FROM` / `JOIN` / `INTO` / `UPDATE` / `TABLE`: relation
     ///   names only.
@@ -613,10 +626,8 @@ impl App {
     /// Falls back to the default list if a context-specific lookup yields
     /// no candidates — better to show *something* than to mis-narrow when
     /// the schema tree hasn't been loaded yet.
-    fn completion_candidates(&self) -> Vec<String> {
-        let lines = self.editor.lines();
-        let (row, col) = self.editor.cursor_pos();
-        match detect_context(lines, row, col) {
+    fn candidates_for_context(&self, ctx: &CompletionContext) -> Vec<String> {
+        match ctx {
             CompletionContext::TableName => {
                 let names = self.tree.relation_names();
                 if names.is_empty() {
@@ -626,7 +637,7 @@ impl App {
                 }
             }
             CompletionContext::Dotted { qualifier } => {
-                let cols = self.resolve_dotted(&qualifier);
+                let cols = self.resolve_dotted(qualifier);
                 if cols.is_empty() {
                     self.default_candidates()
                 } else {
@@ -1744,6 +1755,53 @@ mod tests {
         let popup = app.autocomplete.as_ref().expect("popup");
         let cands: Vec<String> = popup.candidates().to_vec();
         assert_eq!(cands, vec!["id".to_string()]);
+    }
+
+    #[test]
+    fn tab_after_dot_with_no_prefix_opens_column_popup() {
+        // Cursor sits right after `users.` — empty word prefix, but the
+        // dotted context should still surface the column list.
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        populate_tree_for_completion(&mut app);
+        type_str(&mut app, "SELECT users.");
+        app.on_event(AppEvent::Key(key(KeyCode::Tab, KeyModifiers::NONE)));
+        let popup = app.autocomplete.as_ref().expect("popup");
+        let cands: Vec<String> = popup.candidates().to_vec();
+        assert_eq!(cands, vec!["id".to_string(), "email".to_string()]);
+    }
+
+    #[test]
+    fn tab_after_from_with_trailing_space_opens_relation_popup() {
+        // Cursor sits right after `FROM ` — empty word prefix, but
+        // TableName context should still surface relations.
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        populate_tree_for_completion(&mut app);
+        type_str(&mut app, "SELECT * FROM ");
+        app.on_event(AppEvent::Key(key(KeyCode::Tab, KeyModifiers::NONE)));
+        let popup = app.autocomplete.as_ref().expect("popup");
+        let cands: Vec<String> = popup.candidates().to_vec();
+        // Order matches relation_names() — public's relations in
+        // insertion order.
+        assert_eq!(cands, vec!["users".to_string(), "orders".to_string()]);
+    }
+
+    #[test]
+    fn tab_with_empty_prefix_in_default_context_indents() {
+        // After a plain space in a default context (e.g. `SELECT `),
+        // Tab still inserts spaces — we don't want to dump every
+        // keyword + identifier on the user.
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        populate_tree_for_completion(&mut app);
+        type_str(&mut app, "SELECT ");
+        app.on_event(AppEvent::Key(key(KeyCode::Tab, KeyModifiers::NONE)));
+        assert!(app.autocomplete.is_none());
+        assert!(app.editor.text().ends_with("  "));
     }
 
     #[test]
