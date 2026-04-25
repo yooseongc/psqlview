@@ -73,6 +73,62 @@ async fn list_databases_includes_postgres() {
 
 #[tokio::test]
 #[ignore = "requires PSQLVIEW_PG_URL"]
+async fn fetch_table_ddl_synthesizes_create_table() {
+    init_crypto();
+    if pg_url().is_none() {
+        return;
+    }
+    let (client, _handle) = connect_plain().await;
+
+    let ddl = catalog::fetch_table_ddl(&client, "psqlview_test", "orders")
+        .await
+        .expect("fetch ddl");
+
+    assert!(
+        ddl.contains("CREATE TABLE \"psqlview_test\".\"orders\""),
+        "missing header: {ddl}"
+    );
+    assert!(ddl.contains("id bigint"), "id column missing: {ddl}");
+    assert!(
+        ddl.contains("user_id bigint NOT NULL"),
+        "user_id NOT NULL missing: {ddl}"
+    );
+    // Primary key + foreign key + check constraint should all surface.
+    assert!(ddl.contains("PRIMARY KEY (id)"), "PK missing: {ddl}");
+    assert!(
+        ddl.contains("FOREIGN KEY") && ddl.contains("REFERENCES"),
+        "FK missing: {ddl}"
+    );
+    assert!(
+        ddl.contains("CHECK") && ddl.contains("status"),
+        "CHECK constraint missing: {ddl}"
+    );
+    // Standalone index lives after the closing paren.
+    let close = ddl.find(");\n").expect("closing paren");
+    let idx = ddl
+        .find("CREATE INDEX")
+        .unwrap_or_else(|| panic!("CREATE INDEX missing: {ddl}"));
+    assert!(idx > close);
+}
+
+#[tokio::test]
+#[ignore = "requires PSQLVIEW_PG_URL"]
+async fn fetch_table_ddl_returns_error_for_unknown_relation() {
+    init_crypto();
+    if pg_url().is_none() {
+        return;
+    }
+    let (client, _handle) = connect_plain().await;
+
+    let err = catalog::fetch_table_ddl(&client, "psqlview_test", "no_such_table")
+        .await
+        .expect_err("expected not-found error");
+    let msg = err.to_string();
+    assert!(msg.contains("relation not found"), "got: {msg}");
+}
+
+#[tokio::test]
+#[ignore = "requires PSQLVIEW_PG_URL"]
 async fn list_columns_returns_ordered_schema() {
     init_crypto();
     if pg_url().is_none() {

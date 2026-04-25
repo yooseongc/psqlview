@@ -24,6 +24,9 @@ pub enum DbError {
 
     #[error("tls setup: {0}")]
     Tls(String),
+
+    #[error("{0}")]
+    Other(String),
 }
 
 impl DbError {

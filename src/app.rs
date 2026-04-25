@@ -41,6 +41,26 @@ fn build_preview_sql(schema: &str, relation: &str, limit: u32) -> String {
     )
 }
 
+/// Wraps a multi-line DDL string in a synthetic single-column `ResultSet`
+/// so the existing results pane can render and scroll it like any other
+/// query output.
+fn ddl_to_resultset(text: &str, elapsed_ms: u128) -> ResultSet {
+    let rows: Vec<Vec<crate::types::CellValue>> = text
+        .split('\n')
+        .map(|line| vec![crate::types::CellValue::Text(line.to_string())])
+        .collect();
+    ResultSet {
+        columns: vec![crate::types::ColumnMeta {
+            name: "ddl".into(),
+            type_name: "text".into(),
+        }],
+        rows,
+        truncated_at: None,
+        command_tag: None,
+        elapsed_ms,
+    }
+}
+
 /// Top-level screen the app is rendering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -768,6 +788,7 @@ impl App {
             KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => self.expand_current_tree_node(),
             KeyCode::Left | KeyCode::Char('h') => self.tree.collapse_current(),
             KeyCode::Char('p') | KeyCode::Char(' ') => self.run_preview_for_selected_relation(),
+            KeyCode::Char('D') => self.show_ddl_for_selected_relation(),
             _ => {}
         }
     }
@@ -921,6 +942,45 @@ impl App {
         }
     }
 
+    /// Fetches a synthetic `CREATE TABLE` (plus index) DDL for the
+    /// selected relation and routes the text into the results pane as a
+    /// single-column `ddl` result. Reuses the query lifecycle so the
+    /// Running spinner / Done elapsed time / error toast all apply.
+    fn show_ddl_for_selected_relation(&mut self) {
+        let Some(node) = self.tree.current_node() else {
+            return;
+        };
+        let crate::ui::schema_tree::NodeRef::Relation { schema, name, .. } = node else {
+            return;
+        };
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let client = session.client();
+        let cancel = session.cancel_token();
+        self.autocomplete = None;
+        self.query_status = QueryStatus::Running {
+            started_at: Instant::now(),
+            cancel,
+        };
+        self.last_run_sql = Some(format!("-- DDL of {schema}.{name}"));
+        self.results.begin_running();
+        self.focus = FocusPane::Results;
+
+        let tx = self.tx.clone();
+        let schema_owned = schema.clone();
+        let name_owned = name.clone();
+        tokio::spawn(async move {
+            let started = Instant::now();
+            let r = catalog::fetch_table_ddl(&client, &schema_owned, &name_owned).await;
+            let event = match r {
+                Ok(text) => Ok(ddl_to_resultset(&text, started.elapsed().as_millis())),
+                Err(e) => Err(e),
+            };
+            let _ = tx.send(AppEvent::QueryResult(event));
+        });
+    }
+
     fn cancel_running_query(&mut self) {
         if let QueryStatus::Running { cancel, .. } = &self.query_status {
             let cancel = cancel.clone();
@@ -1067,6 +1127,19 @@ mod tests {
         assert_eq!(quote_ident("users"), r#""users""#);
         assert_eq!(quote_ident("My\"Table"), r#""My""Table""#);
         assert_eq!(quote_ident("WITH"), r#""WITH""#);
+    }
+
+    #[test]
+    fn ddl_to_resultset_emits_one_row_per_line() {
+        let r = ddl_to_resultset("CREATE TABLE t (\n  id int\n);\n", 5);
+        assert_eq!(r.columns.len(), 1);
+        assert_eq!(r.columns[0].name, "ddl");
+        assert_eq!(r.rows.len(), 4); // 3 newlines → 4 split parts
+        assert!(matches!(
+            &r.rows[0][0],
+            crate::types::CellValue::Text(s) if s == "CREATE TABLE t ("
+        ));
+        assert_eq!(r.elapsed_ms, 5);
     }
 
     #[test]

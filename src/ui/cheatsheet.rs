@@ -37,6 +37,7 @@ const ROWS: &[(&str, &str)] = &[
         "p / Space",
         "preview rows of selected table (SELECT * LIMIT 200)",
     ),
+    ("D", "show DDL of selected table (synthesized CREATE TABLE)"),
     ("/", "incremental search"),
     ("n / N", "repeat last search forward / back"),
     ("", ""),
