@@ -31,7 +31,8 @@ rustls-pki-types = "1"
 
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
-tui-textarea = { version = "0.7", features = ["search"] }
+# Custom editor in src/ui/editor — replaced tui-textarea so we can do
+# per-token syntax highlighting (R2 of v0.2.0).
 unicode-width = "0.2"
 
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }

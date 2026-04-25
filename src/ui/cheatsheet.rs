@@ -1,7 +1,7 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 const ROWS: &[(&str, &str)] = &[
@@ -62,7 +62,9 @@ const ROWS: &[(&str, &str)] = &[
 ];
 
 pub fn draw(frame: &mut Frame<'_>, screen: Rect) {
-    let w = 72u16.min(screen.width.saturating_sub(2));
+    // Aim for 90 cols wide so the longest descriptions fit on one line,
+    // but always cap to the screen width (Wrap handles narrower terms).
+    let w = 90u16.min(screen.width.saturating_sub(2));
     let h = ((ROWS.len() + 2) as u16).min(screen.height.saturating_sub(2));
     let x = screen.x + screen.width.saturating_sub(w) / 2;
     let y = screen.y + screen.height.saturating_sub(h) / 2;
@@ -104,7 +106,11 @@ pub fn draw(frame: &mut Frame<'_>, screen: Rect) {
         .title(" Keybindings  [Esc / Enter / ? to close] ")
         .border_style(Style::default().fg(Color::Yellow));
 
-    let paragraph = Paragraph::new(lines).block(block);
+    // wrap=trim:false keeps the leading 2-space indent on continuation
+    // lines so wrapped descriptions visually align under the first one.
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false });
 
     frame.render_widget(Clear, area);
     frame.render_widget(paragraph, area);

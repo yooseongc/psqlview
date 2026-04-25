@@ -177,6 +177,12 @@ impl App {
         if self.screen != Screen::Workspace {
             return;
         }
+        // Modal overlays (cheatsheet, row detail) eat mouse events too —
+        // otherwise clicks fall through to the panes underneath, which
+        // looks like the modal isn't actually active.
+        if self.cheatsheet_open || self.row_detail.open {
+            return;
+        }
         let target = self.pane_rects.hit_test(ev.column, ev.row);
         match ev.kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -212,6 +218,10 @@ impl App {
 
     fn on_paste(&mut self, s: String) {
         if self.screen != Screen::Workspace || self.focus != FocusPane::Editor {
+            return;
+        }
+        // Don't shove pasted text into the editor while a modal is up.
+        if self.cheatsheet_open || self.row_detail.open {
             return;
         }
         self.editor.insert_str(&s);
