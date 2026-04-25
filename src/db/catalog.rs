@@ -137,6 +137,67 @@ struct DdlPart {
     def: String,
 }
 
+/// Routes a DDL fetch by relation kind. Tables / partitioned tables /
+/// foreign tables go through [`fetch_table_ddl`]; views and
+/// materialized views go through [`fetch_view_ddl`] (which uses
+/// `pg_get_viewdef`). Anything else falls back to the table path,
+/// which gracefully degrades on unknown relkinds.
+pub async fn fetch_relation_ddl(
+    client: &Client,
+    schema: &str,
+    relation: &str,
+    kind: RelationKind,
+) -> Result<String, DbError> {
+    match kind {
+        RelationKind::View => fetch_view_ddl(client, schema, relation, false).await,
+        RelationKind::MaterializedView => fetch_view_ddl(client, schema, relation, true).await,
+        // Tables, partitioned, foreign — the table path handles all of
+        // these; foreign tables happen to also expose pg_attribute /
+        // pg_constraint rows, so the synthesized CREATE TABLE is a
+        // useful approximation even if it isn't exactly the original
+        // CREATE FOREIGN TABLE.
+        _ => fetch_table_ddl(client, schema, relation).await,
+    }
+}
+
+/// Fetches a `CREATE [MATERIALIZED] VIEW … AS …` statement for the
+/// named view via `pg_get_viewdef`. The flag toggles MATERIALIZED.
+pub async fn fetch_view_ddl(
+    client: &Client,
+    schema: &str,
+    relation: &str,
+    materialized: bool,
+) -> Result<String, DbError> {
+    let row = client
+        .query_opt(
+            "SELECT pg_get_viewdef(c.oid, true)
+             FROM pg_catalog.pg_class c
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+             WHERE n.nspname = $1 AND c.relname = $2",
+            &[&schema, &relation],
+        )
+        .await?;
+    let Some(row) = row else {
+        return Err(DbError::Other(format!(
+            "relation not found: {schema}.{relation}"
+        )));
+    };
+    let body: String = row.get(0);
+    let header = if materialized {
+        "CREATE MATERIALIZED VIEW"
+    } else {
+        "CREATE VIEW"
+    };
+    // pg_get_viewdef indents with 2 spaces and includes the trailing
+    // semicolon — append a final newline for consistency with the
+    // table DDL output.
+    Ok(format!(
+        "{header} {}.{} AS\n{body}\n",
+        quote_pg_ident(schema),
+        quote_pg_ident(relation),
+    ))
+}
+
 /// Fetches a synthetic `CREATE TABLE` definition for `schema.relation`,
 /// plus any standalone `CREATE INDEX` statements. Compatible with
 /// PostgreSQL 14+ (uses only `pg_attribute`, `pg_attrdef`, `pg_class`,

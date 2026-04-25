@@ -58,6 +58,7 @@ pub enum NodeRef {
     Relation {
         schema: String,
         name: String,
+        kind: RelationKind,
         loaded: bool,
     },
     Column {
@@ -339,6 +340,7 @@ impl SchemaTreeState {
                         node: NodeRef::Relation {
                             schema: s.name.clone(),
                             name: r.name.clone(),
+                            kind: r.kind,
                             loaded: matches!(r.load, LoadState::Loaded),
                         },
                         label: relation_label(r),

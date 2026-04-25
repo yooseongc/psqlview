@@ -113,6 +113,56 @@ async fn fetch_table_ddl_synthesizes_create_table() {
 
 #[tokio::test]
 #[ignore = "requires PSQLVIEW_PG_URL"]
+async fn fetch_relation_ddl_for_view_returns_create_view() {
+    init_crypto();
+    if pg_url().is_none() {
+        return;
+    }
+    let (client, _handle) = connect_plain().await;
+
+    let ddl =
+        catalog::fetch_relation_ddl(&client, "psqlview_test", "paid_orders", RelationKind::View)
+            .await
+            .expect("fetch view ddl");
+
+    assert!(
+        ddl.starts_with("CREATE VIEW \"psqlview_test\".\"paid_orders\" AS\n"),
+        "header wrong: {ddl}"
+    );
+    // pg_get_viewdef returns the SELECT body with PG-canonical
+    // spacing; we only assert on the keywords + reference, not the
+    // exact whitespace.
+    assert!(ddl.contains("SELECT"), "missing SELECT: {ddl}");
+    assert!(
+        ddl.contains("psqlview_test.orders"),
+        "missing FROM target: {ddl}"
+    );
+    // Must NOT contain the wrong CREATE TABLE shape that the old code
+    // would have emitted.
+    assert!(
+        !ddl.contains("CREATE TABLE"),
+        "view rendered as CREATE TABLE: {ddl}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires PSQLVIEW_PG_URL"]
+async fn fetch_relation_ddl_for_table_matches_legacy_path() {
+    init_crypto();
+    if pg_url().is_none() {
+        return;
+    }
+    let (client, _handle) = connect_plain().await;
+
+    let ddl = catalog::fetch_relation_ddl(&client, "psqlview_test", "orders", RelationKind::Table)
+        .await
+        .expect("fetch table ddl via router");
+    assert!(ddl.contains("CREATE TABLE \"psqlview_test\".\"orders\""));
+    assert!(ddl.contains("PRIMARY KEY (id)"));
+}
+
+#[tokio::test]
+#[ignore = "requires PSQLVIEW_PG_URL"]
 async fn fetch_table_ddl_returns_error_for_unknown_relation() {
     init_crypto();
     if pg_url().is_none() {
