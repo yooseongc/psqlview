@@ -49,6 +49,7 @@ const ROWS: &[(&str, &str)] = &[
     ("Ctrl+Left / Ctrl+Right", "first / last column"),
     ("Ctrl+E", "export current result set to CSV"),
     ("y / Y", "copy current cell / row (OSC 52 clipboard)"),
+    ("R", "re-run last query (or refresh DDL view)"),
     ("Enter", "row detail view"),
     (
         "s",

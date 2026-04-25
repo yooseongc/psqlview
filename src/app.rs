@@ -534,6 +534,15 @@ impl App {
                         self.copy_current_row_to_clipboard();
                         return;
                     }
+                    // R re-runs the most recent query. Useful for
+                    // refreshing a long-running result without going back
+                    // to the editor.
+                    if key.modifiers == KeyModifiers::SHIFT
+                        && matches!(key.code, KeyCode::Char('R'))
+                    {
+                        self.rerun_last_query();
+                        return;
+                    }
                     // Enter on a populated result opens the per-row
                     // detail modal, bypassing the Results handler.
                     if matches!(key.code, KeyCode::Enter)
@@ -953,6 +962,54 @@ impl App {
         }
     }
 
+    /// Re-runs the most recent query. The DDL-view placeholder
+    /// (`-- DDL of …`) is detected and re-fetched as DDL instead of run
+    /// literally — a literal run would return nothing useful.
+    fn rerun_last_query(&mut self) {
+        let Some(sql) = self.last_run_sql.clone() else {
+            self.toast_info("no previous query".into());
+            return;
+        };
+        if let Some(rest) = sql.strip_prefix("-- DDL of ") {
+            // Format is "-- DDL of schema.relation".
+            if let Some((schema, relation)) = rest.split_once('.') {
+                self.rerun_ddl_for(schema.to_string(), relation.to_string());
+                return;
+            }
+        }
+        self.dispatch_sql(sql);
+    }
+
+    /// Fires off the same DDL fetch as `show_ddl_for_selected_relation`
+    /// but with explicit schema / relation rather than the tree's
+    /// currently-selected node. Used by `rerun_last_query` to refresh
+    /// the DDL view without bouncing through the tree.
+    fn rerun_ddl_for(&mut self, schema: String, relation: String) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let client = session.client();
+        let cancel = session.cancel_token();
+        self.autocomplete = None;
+        self.query_status = QueryStatus::Running {
+            started_at: Instant::now(),
+            cancel,
+        };
+        self.last_run_sql = Some(format!("-- DDL of {schema}.{relation}"));
+        self.results.begin_running();
+
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let started = Instant::now();
+            let r = catalog::fetch_table_ddl(&client, &schema, &relation).await;
+            let event = match r {
+                Ok(text) => Ok(ddl_to_resultset(&text, started.elapsed().as_millis())),
+                Err(e) => Err(e),
+            };
+            let _ = tx.send(AppEvent::QueryResult(event));
+        });
+    }
+
     fn run_current_query(&mut self) {
         // Run just the selected portion when one exists, so users can
         // execute a single statement from a buffer of many.
@@ -1291,6 +1348,18 @@ mod tests {
         // Move x_offset → cell follows the leftmost visible column.
         app.results.x_offset = 1;
         assert_eq!(app.format_current_cell().as_deref(), Some(""));
+    }
+
+    #[test]
+    fn rerun_with_no_history_shows_info_toast() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Results;
+        // last_run_sql starts as None.
+        app.on_event(AppEvent::Key(key(KeyCode::Char('R'), KeyModifiers::SHIFT)));
+        let toast = app.toast.as_ref().expect("toast set");
+        assert!(!toast.is_error);
+        assert!(toast.message.contains("no previous query"));
     }
 
     #[test]
