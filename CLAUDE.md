@@ -179,9 +179,19 @@ top-level `App` never touches the ratatui widgets directly.
   `outdent_lines`.
 - `autocomplete.rs` holds `AutocompletePopup` — a prefix-filtered
   candidate list overlaid on the editor. Opened by Tab when a word
-  prefix sits at the cursor. Candidates: hard-coded `SQL_KEYWORDS`
-  plus `SchemaTreeState::collect_identifiers()`. The popup is owned
-  by `App`, not by the editor, because it needs access to the tree.
+  prefix sits at the cursor. The popup is owned by `App`, not by the
+  editor, because it needs access to the tree.
+  `autocomplete_context.rs::detect_context` classifies the cursor as
+  `TableName` (after FROM/JOIN/INTO/UPDATE/TABLE), `Dotted { qualifier }`
+  (right after `q.`), or `Default`. `App::completion_candidates` then
+  feeds the popup a narrowed list:
+    - TableName → `tree.relation_names()`
+    - Dotted: alias resolved via `extract_aliases` → `columns_of_relation`,
+      else direct relation match → columns, else schema match → relations
+      in that schema
+    - Default → hard-coded `SQL_KEYWORDS` + `tree.collect_identifiers()`
+  Falls back to Default when the narrowed list is empty (tree not yet
+  loaded), so completion still works pre-introspection.
 - `row_detail.rs` is a centered overlay that lists every column of
   the currently-selected result row. Opened by Enter on a populated
   Results pane; absorbs its own Esc/Enter/arrow keys.

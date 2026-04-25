@@ -131,6 +131,12 @@ impl AutocompletePopup {
     pub fn is_empty(&self) -> bool {
         self.filtered.is_empty()
     }
+
+    /// Currently filtered candidates, in display order. Tests use this to
+    /// assert that the candidate pool was narrowed correctly.
+    pub fn candidates(&self) -> &[String] {
+        &self.filtered
+    }
 }
 
 fn filter(prefix: &str, all: &[String]) -> Vec<String> {

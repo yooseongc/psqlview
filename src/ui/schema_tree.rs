@@ -258,6 +258,45 @@ impl SchemaTreeState {
         }
     }
 
+    /// Loaded relation names across all schemas, deduplicated. Used as the
+    /// candidate list when the cursor sits after FROM / JOIN / etc.
+    pub fn relation_names(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for s in &self.schemas {
+            for r in &s.relations {
+                if seen.insert(r.name.clone()) {
+                    out.push(r.name.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// Loaded relation names in the named schema. Empty if the schema is
+    /// unknown or its relations haven't been loaded yet.
+    pub fn relation_names_in_schema(&self, schema: &str) -> Vec<String> {
+        self.schemas
+            .iter()
+            .find(|s| s.name == schema)
+            .map(|s| s.relations.iter().map(|r| r.name.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Column names of the first loaded relation matching `relation` in any
+    /// schema. Empty if the relation isn't found or its columns haven't
+    /// been loaded yet (the user hasn't expanded the relation in the tree).
+    pub fn columns_of_relation(&self, relation: &str) -> Vec<String> {
+        for s in &self.schemas {
+            for r in &s.relations {
+                if r.name == relation {
+                    return r.columns.iter().map(|c| c.name.clone()).collect();
+                }
+            }
+        }
+        Vec::new()
+    }
+
     /// Returns all known identifier names (schemas, relations, columns) for
     /// autocomplete candidates. Dedups and preserves first-seen order so a
     /// popup shows stable results. Only walks what's already loaded — no I/O.
@@ -578,6 +617,38 @@ mod tests {
         // but must be in the output only once each.
         assert_eq!(ids.iter().filter(|n| *n == "users").count(), 1);
         assert_eq!(ids.iter().filter(|n| *n == "id").count(), 1);
+    }
+
+    #[test]
+    fn relation_names_dedups_across_schemas() {
+        let mut s = SchemaTreeState::default();
+        s.set_schemas(vec!["public".into(), "psqlview_test".into()]);
+        s.set_relations("public", vec![rel("users"), rel("orders")]);
+        s.set_relations("psqlview_test", vec![rel("users")]);
+        let names = s.relation_names();
+        assert_eq!(names.iter().filter(|n| *n == "users").count(), 1);
+        assert!(names.contains(&"orders".to_string()));
+    }
+
+    #[test]
+    fn relation_names_in_schema_filters_to_one_schema() {
+        let mut s = SchemaTreeState::default();
+        s.set_schemas(vec!["public".into(), "other".into()]);
+        s.set_relations("public", vec![rel("users")]);
+        s.set_relations("other", vec![rel("logs")]);
+        assert_eq!(s.relation_names_in_schema("public"), vec!["users"]);
+        assert_eq!(s.relation_names_in_schema("other"), vec!["logs"]);
+        assert!(s.relation_names_in_schema("nope").is_empty());
+    }
+
+    #[test]
+    fn columns_of_relation_returns_loaded_columns() {
+        let mut s = SchemaTreeState::default();
+        s.set_schemas(vec!["public".into()]);
+        s.set_relations("public", vec![rel("users")]);
+        s.set_columns("public", "users", vec![col("id"), col("email")]);
+        assert_eq!(s.columns_of_relation("users"), vec!["id", "email"]);
+        assert!(s.columns_of_relation("missing").is_empty());
     }
 
     #[test]

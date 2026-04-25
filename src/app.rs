@@ -10,6 +10,7 @@ use crate::db::{self, catalog, Session};
 use crate::event::AppEvent;
 use crate::types::ResultSet;
 use crate::ui::autocomplete::{AutocompletePopup, SQL_KEYWORDS};
+use crate::ui::autocomplete_context::{detect_context, extract_aliases, CompletionContext};
 use crate::ui::connect_dialog::ConnectDialogState;
 use crate::ui::editor::EditorState;
 use crate::ui::results::ResultsState;
@@ -452,12 +453,77 @@ impl App {
             self.editor.insert_spaces(2);
             return;
         }
-        let mut candidates: Vec<String> = SQL_KEYWORDS.iter().map(|s| (*s).to_string()).collect();
-        candidates.extend(self.tree.collect_identifiers());
+        let candidates = self.completion_candidates();
         match AutocompletePopup::open(prefix, candidates) {
             Some(popup) => self.autocomplete = Some(popup),
             None => self.editor.insert_spaces(2),
         }
+    }
+
+    /// Builds the candidate pool for the autocomplete popup. The list is
+    /// narrowed by the cursor's surrounding clause:
+    ///
+    /// - After `FROM` / `JOIN` / `INTO` / `UPDATE` / `TABLE`: relation
+    ///   names only.
+    /// - After `qualifier.`: columns of `qualifier`, where `qualifier` is
+    ///   resolved as (1) an alias defined in the same buffer, (2) a known
+    ///   relation name, or (3) a known schema name (in which case the
+    ///   candidates become the relation names in that schema).
+    /// - Otherwise: the full keyword + identifier list.
+    ///
+    /// Falls back to the default list if a context-specific lookup yields
+    /// no candidates — better to show *something* than to mis-narrow when
+    /// the schema tree hasn't been loaded yet.
+    fn completion_candidates(&self) -> Vec<String> {
+        let lines = self.editor.lines();
+        let (row, col) = self.editor.cursor_pos();
+        match detect_context(lines, row, col) {
+            CompletionContext::TableName => {
+                let names = self.tree.relation_names();
+                if names.is_empty() {
+                    self.default_candidates()
+                } else {
+                    names
+                }
+            }
+            CompletionContext::Dotted { qualifier } => {
+                let cols = self.resolve_dotted(&qualifier);
+                if cols.is_empty() {
+                    self.default_candidates()
+                } else {
+                    cols
+                }
+            }
+            CompletionContext::Default => self.default_candidates(),
+        }
+    }
+
+    fn default_candidates(&self) -> Vec<String> {
+        let mut out: Vec<String> = SQL_KEYWORDS.iter().map(|s| (*s).to_string()).collect();
+        out.extend(self.tree.collect_identifiers());
+        out
+    }
+
+    /// Resolves `qualifier.` to a column list. Tries alias mapping first
+    /// (so `u.` after `FROM users u` lists `users` columns), then a direct
+    /// relation match, then schema-qualified relations.
+    fn resolve_dotted(&self, qualifier: &str) -> Vec<String> {
+        let aliases = extract_aliases(self.editor.lines());
+        let alias_target = aliases
+            .iter()
+            .find(|(alias, _)| alias.eq_ignore_ascii_case(qualifier))
+            .map(|(_, rel)| rel.clone());
+        if let Some(rel) = alias_target {
+            let cols = self.tree.columns_of_relation(&rel);
+            if !cols.is_empty() {
+                return cols;
+            }
+        }
+        let direct = self.tree.columns_of_relation(qualifier);
+        if !direct.is_empty() {
+            return direct;
+        }
+        self.tree.relation_names_in_schema(qualifier)
     }
 
     /// Closes the autocomplete popup if the current prefix is empty or
@@ -1090,5 +1156,108 @@ mod tests {
         }
         app.on_event(AppEvent::Key(key(KeyCode::Tab, KeyModifiers::NONE)));
         assert!(app.autocomplete.is_some(), "popup should open for 'SEL'");
+    }
+
+    fn populate_tree_for_completion(app: &mut App) {
+        use crate::db::catalog::{Column, Relation, RelationKind};
+        app.tree.set_schemas(vec!["public".into()]);
+        app.tree.set_relations(
+            "public",
+            vec![
+                Relation {
+                    name: "users".into(),
+                    kind: RelationKind::Table,
+                },
+                Relation {
+                    name: "orders".into(),
+                    kind: RelationKind::Table,
+                },
+            ],
+        );
+        app.tree.set_columns(
+            "public",
+            "users",
+            vec![
+                Column {
+                    name: "id".into(),
+                    data_type: "int".into(),
+                    nullable: false,
+                    default: None,
+                },
+                Column {
+                    name: "email".into(),
+                    data_type: "text".into(),
+                    nullable: true,
+                    default: None,
+                },
+            ],
+        );
+    }
+
+    fn type_str(app: &mut App, s: &str) {
+        for c in s.chars() {
+            app.on_event(AppEvent::Key(key(KeyCode::Char(c), KeyModifiers::NONE)));
+        }
+    }
+
+    #[test]
+    fn tab_after_from_narrows_to_relation_names() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        populate_tree_for_completion(&mut app);
+        type_str(&mut app, "SELECT * FROM us");
+        app.on_event(AppEvent::Key(key(KeyCode::Tab, KeyModifiers::NONE)));
+        let popup = app.autocomplete.as_ref().expect("popup");
+        let cands: Vec<String> = popup.candidates().to_vec();
+        assert_eq!(cands, vec!["users".to_string()]);
+    }
+
+    #[test]
+    fn tab_after_relation_dot_lists_columns() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        populate_tree_for_completion(&mut app);
+        type_str(&mut app, "SELECT users.i");
+        app.on_event(AppEvent::Key(key(KeyCode::Tab, KeyModifiers::NONE)));
+        let popup = app.autocomplete.as_ref().expect("popup");
+        let cands: Vec<String> = popup.candidates().to_vec();
+        assert_eq!(cands, vec!["id".to_string()]);
+    }
+
+    #[test]
+    fn tab_after_alias_dot_resolves_alias_to_relation() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        populate_tree_for_completion(&mut app);
+        // Pre-populate the FROM clause, then drop the cursor between
+        // SELECT and FROM and type the dotted alias prefix there. End
+        // result: "SELECT u.em FROM users u" with the cursor right after
+        // "em" so the word prefix is "em".
+        app.editor.set_text("SELECT  FROM users u");
+        assert!(app.editor.move_cursor_to_char_position(8));
+        type_str(&mut app, "u.em");
+        app.on_event(AppEvent::Key(key(KeyCode::Tab, KeyModifiers::NONE)));
+        let popup = app.autocomplete.as_ref().expect("popup");
+        let cands: Vec<String> = popup.candidates().to_vec();
+        assert_eq!(cands, vec!["email".to_string()]);
+    }
+
+    #[test]
+    fn tab_after_where_uses_default_candidates() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        populate_tree_for_completion(&mut app);
+        type_str(&mut app, "SELECT * FROM users WHERE i");
+        app.on_event(AppEvent::Key(key(KeyCode::Tab, KeyModifiers::NONE)));
+        let popup = app.autocomplete.as_ref().expect("popup");
+        let cands: Vec<String> = popup.candidates().to_vec();
+        // Default pool includes both keywords (e.g. INTO, IN, IS) and
+        // identifiers (e.g. id). It must NOT be just relation names.
+        assert!(cands.contains(&"id".to_string()));
+        assert!(cands.iter().any(|s| s == "IN" || s == "INTO" || s == "IS"));
     }
 }

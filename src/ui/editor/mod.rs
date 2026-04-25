@@ -58,6 +58,18 @@ impl EditorState {
         (c.row + 1, c.col + 1)
     }
 
+    /// Raw buffer lines (LF-separated). Used by the completion-context
+    /// detector to tokenize the prefix preceding the cursor.
+    pub fn lines(&self) -> &[String] {
+        self.buf.lines()
+    }
+
+    /// Cursor position as `(row, col)` in 0-indexed char units.
+    pub fn cursor_pos(&self) -> (usize, usize) {
+        let c = self.buf.cursor();
+        (c.row, c.col)
+    }
+
     /// Returns the currently selected text, or `None` if no selection is
     /// active. Used to let F5 / Ctrl+Enter run just the highlighted SQL.
     pub fn selected_text(&self) -> Option<String> {

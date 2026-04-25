@@ -1,4 +1,5 @@
 pub mod autocomplete;
+pub mod autocomplete_context;
 pub mod cheatsheet;
 pub mod connect_dialog;
 pub mod editor;
