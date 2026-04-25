@@ -10,6 +10,7 @@ pub mod bracket;
 pub mod buffer;
 pub mod edit;
 pub mod render;
+pub mod tab;
 pub mod undo;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};

@@ -25,7 +25,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let focus_label = match app.focus {
         FocusPane::Tree => "focus: schema".to_string(),
         FocusPane::Editor => {
-            let (line, col) = app.editor.cursor_line_col();
+            let (line, col) = app.editor().cursor_line_col();
             format!("focus: editor  ln {line}, col {col}")
         }
         FocusPane::Results => "focus: results".to_string(),

@@ -82,12 +82,8 @@ fn draw_workspace(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         app.focus == FocusPane::Tree,
         tree_rect,
     );
-    editor::draw(
-        frame,
-        &mut app.editor,
-        app.focus == FocusPane::Editor,
-        editor_rect,
-    );
+    let editor_focused = app.focus == FocusPane::Editor;
+    editor::draw(frame, app.editor_mut(), editor_focused, editor_rect);
     results::draw(
         frame,
         &mut app.results,

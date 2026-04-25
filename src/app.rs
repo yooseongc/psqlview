@@ -14,6 +14,7 @@ use crate::ui::autocomplete::{AutocompletePopup, SQL_KEYWORDS};
 use crate::ui::autocomplete_context::{detect_context, extract_aliases, CompletionContext};
 use crate::ui::connect_dialog::ConnectDialogState;
 use crate::ui::csv_export;
+use crate::ui::editor::tab::TabSlot;
 use crate::ui::editor::EditorState;
 use crate::ui::file_prompt::{self, FilePromptMode, FilePromptState};
 use crate::ui::results::ResultsState;
@@ -142,7 +143,12 @@ pub struct App {
     pub session: Option<Session>,
 
     pub tree: SchemaTreeState,
-    pub editor: EditorState,
+    /// Open editor buffers. There is always at least one tab; closing
+    /// the last tab replaces it with a fresh empty `TabSlot`. R1 ships
+    /// this as a Vec of length 1 — multi-tab UX lands in R2.
+    pub tabs: Vec<TabSlot>,
+    /// Index into `tabs` of the currently active editor.
+    pub active_tab: usize,
     pub results: ResultsState,
 
     pub focus: FocusPane,
@@ -196,7 +202,8 @@ impl App {
             connect_dialog: ConnectDialogState::new(ConnInfo::default()),
             session: None,
             tree: SchemaTreeState::default(),
-            editor: EditorState::new(),
+            tabs: vec![TabSlot::new()],
+            active_tab: 0,
             results: ResultsState::default(),
             focus: FocusPane::Editor,
             query_status: QueryStatus::Idle,
@@ -214,6 +221,17 @@ impl App {
             should_quit: false,
             tx,
         }
+    }
+
+    /// Borrow the active tab's editor immutably. Always valid — `tabs`
+    /// is non-empty by construction.
+    pub fn editor(&self) -> &EditorState {
+        &self.tabs[self.active_tab].editor
+    }
+
+    /// Borrow the active tab's editor mutably.
+    pub fn editor_mut(&mut self) -> &mut EditorState {
+        &mut self.tabs[self.active_tab].editor
     }
 
     pub fn on_event(&mut self, ev: AppEvent) {
@@ -287,7 +305,7 @@ impl App {
                     "mouse scroll"
                 );
                 match pane {
-                    FocusPane::Editor => self.editor.scroll_lines(delta),
+                    FocusPane::Editor => self.editor_mut().scroll_lines(delta),
                     FocusPane::Results => self.results.scroll_rows(delta),
                     FocusPane::Tree => self.tree.scroll_rows(delta),
                 }
@@ -304,7 +322,7 @@ impl App {
         if self.cheatsheet_open || self.row_detail.open {
             return;
         }
-        self.editor.insert_str(&s);
+        self.editor_mut().insert_str(&s);
     }
 
     fn on_tick(&mut self) {
@@ -514,10 +532,10 @@ impl App {
             }
             KeyCode::BackTab => {
                 if self.focus == FocusPane::Editor {
-                    if let Some((s, e)) = self.editor.selected_line_range() {
-                        self.editor.outdent_lines(s, e);
+                    if let Some((s, e)) = self.editor().selected_line_range() {
+                        self.editor_mut().outdent_lines(s, e);
                     } else {
-                        self.editor.outdent_current_line();
+                        self.editor_mut().outdent_current_line();
                     }
                 } else {
                     self.focus = match self.focus {
@@ -529,7 +547,7 @@ impl App {
             }
             _ => match self.focus {
                 FocusPane::Editor => {
-                    self.editor.handle_key(key);
+                    self.editor_mut().handle_key(key);
                     // Any direct edit invalidates an in-progress history
                     // walk; user is no longer just browsing.
                     self.history_cursor = None;
@@ -581,23 +599,29 @@ impl App {
     /// multi-line selection is active, instead block-indents the entire
     /// selected range.
     fn handle_editor_tab(&mut self) {
-        if let Some((s, e)) = self.editor.selected_line_range() {
+        if let Some((s, e)) = self.editor().selected_line_range() {
             if e > s {
-                self.editor.indent_lines(s, e);
+                self.editor_mut().indent_lines(s, e);
                 return;
             }
         }
-        let prefix = self.editor.word_prefix_before_cursor();
-        let lines = self.editor.lines();
-        let (row, col) = self.editor.cursor_pos();
-        let ctx = detect_context(lines, row, col);
+        let prefix = self.editor().word_prefix_before_cursor();
+        let (row, col) = self.editor().cursor_pos();
+        // Snapshot the lines before we need a `&self` borrow for
+        // candidate building — `lines()` returns a reference into the
+        // editor's buffer that would otherwise alias with self for the
+        // duration of the call.
+        let ctx = {
+            let lines = self.editor().lines();
+            detect_context(lines, row, col)
+        };
         // The popup opens with no prefix when the surrounding clause
         // already narrows the candidate list (after `FROM ` or
         // `qualifier.`), so the user doesn't have to type a starting
         // letter to discover what's available.
         let context_narrows = !matches!(ctx, CompletionContext::Default);
         if prefix.is_empty() && !context_narrows {
-            self.editor.insert_spaces(2);
+            self.editor_mut().insert_spaces(2);
             return;
         }
         let candidates = self.candidates_for_context(&ctx);
@@ -608,7 +632,7 @@ impl App {
         };
         match popup {
             Some(popup) => self.autocomplete = Some(popup),
-            None => self.editor.insert_spaces(2),
+            None => self.editor_mut().insert_spaces(2),
         }
     }
 
@@ -658,7 +682,7 @@ impl App {
     /// (so `u.` after `FROM users u` lists `users` columns), then a direct
     /// relation match, then schema-qualified relations.
     fn resolve_dotted(&self, qualifier: &str) -> Vec<String> {
-        let aliases = extract_aliases(self.editor.lines());
+        let aliases = extract_aliases(self.editor().lines());
         let alias_target = aliases
             .iter()
             .find(|(alias, _)| alias.eq_ignore_ascii_case(qualifier))
@@ -741,14 +765,14 @@ impl App {
                     // Normalize CRLF so Windows line endings don't show as
                     // blank lines in the editor.
                     let normalized = text.replace("\r\n", "\n");
-                    self.editor.set_text(&normalized);
+                    self.editor_mut().set_text(&normalized);
                     self.toast_info(format!("opened: {}", path.display()));
                 }
                 Err(e) => {
                     self.toast_error(format!("open failed: {e}"));
                 }
             },
-            FilePromptMode::Save => match std::fs::write(&path, self.editor.text()) {
+            FilePromptMode::Save => match std::fs::write(&path, self.editor().text()) {
                 Ok(()) => {
                     self.toast_info(format!("saved: {}", path.display()));
                 }
@@ -803,7 +827,7 @@ impl App {
             }
             KeyCode::Tab | KeyCode::Enter if key.modifiers.is_empty() => {
                 if let Some(pick) = popup.current().map(str::to_string) {
-                    self.editor.replace_word_prefix(&pick);
+                    self.editor_mut().replace_word_prefix(&pick);
                 }
                 self.autocomplete = None;
                 true
@@ -816,7 +840,7 @@ impl App {
                 if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
             {
                 // Let the editor insert the character, then extend the filter.
-                self.editor.handle_key(key);
+                self.editor_mut().handle_key(key);
                 if let Some(popup) = self.autocomplete.as_mut() {
                     popup.extend_prefix(c);
                 }
@@ -824,7 +848,7 @@ impl App {
                 true
             }
             KeyCode::Backspace => {
-                self.editor.handle_key(key);
+                self.editor_mut().handle_key(key);
                 if let Some(popup) = self.autocomplete.as_mut() {
                     popup.shrink_prefix();
                 }
@@ -1018,10 +1042,10 @@ impl App {
         // Run just the selected portion when one exists, so users can
         // execute a single statement from a buffer of many.
         let sql = self
-            .editor
+            .editor()
             .selected_text()
             .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| self.editor.text());
+            .unwrap_or_else(|| self.editor().text());
         if sql.trim().is_empty() {
             self.toast_info("editor is empty".into());
             return;
@@ -1209,7 +1233,7 @@ impl App {
                 // Jump the editor caret to the offending position so the
                 // user can start typing the fix without hunting for it.
                 if let Some(pos) = err.original_position() {
-                    self.editor.move_cursor_to_char_position(pos);
+                    self.editor_mut().move_cursor_to_char_position(pos);
                 }
                 self.query_status = QueryStatus::Failed(detailed.clone());
                 self.results.clear();
@@ -1250,7 +1274,7 @@ impl App {
             Some(i) => (i + 1).min(self.history.len() - 1),
         };
         if let Some(entry) = self.history.get(next).cloned() {
-            self.editor.set_text(&entry);
+            self.editor_mut().set_text(&entry);
             self.history_cursor = Some(next);
         }
     }
@@ -1260,12 +1284,12 @@ impl App {
     fn history_next(&mut self) {
         let Some(i) = self.history_cursor else { return };
         if i == 0 {
-            self.editor.set_text("");
+            self.editor_mut().set_text("");
             self.history_cursor = None;
         } else {
             let new = i - 1;
             if let Some(entry) = self.history.get(new).cloned() {
-                self.editor.set_text(&entry);
+                self.editor_mut().set_text(&entry);
                 self.history_cursor = Some(new);
             }
         }
@@ -1415,14 +1439,14 @@ mod tests {
         app.screen = Screen::Workspace;
         app.focus = FocusPane::Editor;
         type_str(&mut app, "SELECT 1");
-        let before = app.editor.text();
+        let before = app.editor().text();
         app.on_event(AppEvent::Key(key(
             KeyCode::Char('j'),
             KeyModifiers::CONTROL,
         )));
         // Editor unchanged — the Ctrl+J was treated as Ctrl+Enter, not
         // a literal char insertion.
-        assert_eq!(app.editor.text(), before);
+        assert_eq!(app.editor().text(), before);
     }
 
     #[test]
@@ -1460,6 +1484,25 @@ mod tests {
             build_preview_sql("ns", "with\"quote", 50),
             r#"SELECT * FROM "ns"."with""quote" LIMIT 50"#
         );
+    }
+
+    #[test]
+    fn fresh_app_has_one_active_tab() {
+        let (app, _rx) = app_with_channel();
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.active_tab, 0);
+        // Active tab is fresh: empty buffer, no path, not dirty.
+        assert_eq!(app.editor().text(), "");
+        assert!(app.tabs[0].path.is_none());
+        assert!(!app.tabs[0].dirty);
+    }
+
+    #[test]
+    fn editor_helpers_resolve_to_active_tab() {
+        let (mut app, _rx) = app_with_channel();
+        app.editor_mut().set_text("abc");
+        assert_eq!(app.editor().text(), "abc");
+        assert_eq!(app.tabs[app.active_tab].editor.text(), "abc");
     }
 
     #[test]
@@ -1618,7 +1661,7 @@ mod tests {
         app.on_event(AppEvent::Key(key(KeyCode::Tab, KeyModifiers::NONE)));
         // No word prefix → Tab inserts 2 spaces; focus stays on editor.
         assert_eq!(app.focus, FocusPane::Editor);
-        assert_eq!(app.editor.text(), "  ");
+        assert_eq!(app.editor().text(), "  ");
         assert!(app.autocomplete.is_none());
     }
 
@@ -1628,7 +1671,7 @@ mod tests {
         app.screen = Screen::Workspace;
         app.focus = FocusPane::Editor;
         app.on_event(AppEvent::Paste("SELECT 1;\nSELECT 2;".into()));
-        assert_eq!(app.editor.text(), "SELECT 1;\nSELECT 2;");
+        assert_eq!(app.editor().text(), "SELECT 1;\nSELECT 2;");
     }
 
     #[test]
@@ -1637,7 +1680,7 @@ mod tests {
         app.screen = Screen::Workspace;
         app.focus = FocusPane::Results;
         app.on_event(AppEvent::Paste("noise".into()));
-        assert_eq!(app.editor.text(), "");
+        assert_eq!(app.editor().text(), "");
     }
 
     #[test]
@@ -1645,7 +1688,7 @@ mod tests {
         let (mut app, _rx) = app_with_channel();
         // default screen is Connect
         app.on_event(AppEvent::Paste("noise".into()));
-        assert_eq!(app.editor.text(), "");
+        assert_eq!(app.editor().text(), "");
     }
 
     #[test]
@@ -1810,7 +1853,7 @@ mod tests {
         type_str(&mut app, "SELECT ");
         app.on_event(AppEvent::Key(key(KeyCode::Tab, KeyModifiers::NONE)));
         assert!(app.autocomplete.is_none());
-        assert!(app.editor.text().ends_with("  "));
+        assert!(app.editor().text().ends_with("  "));
     }
 
     #[test]
@@ -1823,8 +1866,8 @@ mod tests {
         // SELECT and FROM and type the dotted alias prefix there. End
         // result: "SELECT u.em FROM users u" with the cursor right after
         // "em" so the word prefix is "em".
-        app.editor.set_text("SELECT  FROM users u");
-        assert!(app.editor.move_cursor_to_char_position(8));
+        app.editor_mut().set_text("SELECT  FROM users u");
+        assert!(app.editor_mut().move_cursor_to_char_position(8));
         type_str(&mut app, "u.em");
         app.on_event(AppEvent::Key(key(KeyCode::Tab, KeyModifiers::NONE)));
         let popup = app.autocomplete.as_ref().expect("popup");
@@ -1948,7 +1991,7 @@ mod tests {
 
         assert!(app.file_prompt.is_none());
         // CRLF in the file is normalized to LF on load.
-        assert_eq!(app.editor.text(), "SELECT loaded;\nFROM disk\n");
+        assert_eq!(app.editor().text(), "SELECT loaded;\nFROM disk\n");
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1969,7 +2012,7 @@ mod tests {
         assert!(app.file_prompt.is_none());
         assert!(!std::path::Path::new("/should/not/exist.sql").exists());
         // Editor buffer untouched.
-        assert_eq!(app.editor.text(), "x");
+        assert_eq!(app.editor().text(), "x");
     }
 
     #[test]
@@ -1988,7 +2031,7 @@ mod tests {
         }
         app.on_event(AppEvent::Key(key(KeyCode::Enter, KeyModifiers::NONE)));
         assert!(app.file_prompt.is_none());
-        assert_eq!(app.editor.text(), "keep me");
+        assert_eq!(app.editor().text(), "keep me");
         let toast = app.toast.as_ref().expect("error toast");
         assert!(toast.is_error);
         assert!(toast.message.contains("open failed"));
