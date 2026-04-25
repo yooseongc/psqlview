@@ -13,6 +13,7 @@ use crate::ui::autocomplete::{AutocompletePopup, SQL_KEYWORDS};
 use crate::ui::autocomplete_context::{detect_context, extract_aliases, CompletionContext};
 use crate::ui::connect_dialog::ConnectDialogState;
 use crate::ui::editor::EditorState;
+use crate::ui::file_prompt::{self, FilePromptMode, FilePromptState};
 use crate::ui::results::ResultsState;
 use crate::ui::row_detail::RowDetailState;
 use crate::ui::schema_tree::SchemaTreeState;
@@ -91,6 +92,10 @@ pub struct App {
     /// Whether the keybinding cheatsheet overlay is visible.
     pub cheatsheet_open: bool,
 
+    /// Inline filename prompt for `Ctrl+O` / `Ctrl+S`. While `Some`, the
+    /// prompt is modal at the application level — every key routes to it.
+    pub file_prompt: Option<FilePromptState>,
+
     /// SQL of the most recently executed query. Retained so error renderers
     /// can place a caret at the reported POSITION.
     pub last_run_sql: Option<String>,
@@ -127,6 +132,7 @@ impl App {
             autocomplete: None,
             row_detail: RowDetailState::default(),
             cheatsheet_open: false,
+            file_prompt: None,
             last_run_sql: None,
             history: VecDeque::new(),
             history_cursor: None,
@@ -240,6 +246,14 @@ impl App {
         // Global hotkeys first. Ctrl+C / Ctrl+Q quit unconditionally.
         if is_ctrl_c(&key) || is_ctrl_q(&key) {
             self.should_quit = true;
+            return;
+        }
+
+        // The file prompt is the most aggressive modal: while it's open,
+        // every key (except quit, handled above) goes to it. We don't want
+        // a stray F1 or `?` to dismiss the dialog mid-typing.
+        if self.file_prompt.is_some() {
+            self.handle_file_prompt_key(key);
             return;
         }
 
@@ -363,7 +377,8 @@ impl App {
 
         // Ctrl+Up/Down in the editor recalls past queries from session
         // history. Ignored outside the editor so the tree/results panes
-        // keep their scroll semantics.
+        // keep their scroll semantics. Ctrl+O / Ctrl+S open the file
+        // prompt for read / write.
         if self.focus == FocusPane::Editor && key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
                 KeyCode::Up => {
@@ -372,6 +387,14 @@ impl App {
                 }
                 KeyCode::Down => {
                     self.history_next();
+                    return;
+                }
+                KeyCode::Char('o') | KeyCode::Char('O') => {
+                    self.open_file_prompt(FilePromptMode::Open);
+                    return;
+                }
+                KeyCode::Char('s') | KeyCode::Char('S') => {
+                    self.open_file_prompt(FilePromptMode::Save);
                     return;
                 }
                 _ => {}
@@ -524,6 +547,80 @@ impl App {
             return direct;
         }
         self.tree.relation_names_in_schema(qualifier)
+    }
+
+    /// Opens the inline filename prompt for the given mode. Closes any
+    /// active autocomplete popup so the next keystroke is unambiguously
+    /// routed to the prompt.
+    fn open_file_prompt(&mut self, mode: FilePromptMode) {
+        self.autocomplete = None;
+        self.file_prompt = Some(FilePromptState::new(mode));
+    }
+
+    /// Routes a keystroke to the file-prompt modal. Only Enter / Esc /
+    /// printable characters / Backspace are meaningful; everything else
+    /// is silently swallowed so global shortcuts like F-keys don't
+    /// dismiss the prompt by accident.
+    fn handle_file_prompt_key(&mut self, key: KeyEvent) {
+        let Some(state) = self.file_prompt.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                self.file_prompt = None;
+            }
+            KeyCode::Enter => {
+                self.commit_file_prompt();
+            }
+            KeyCode::Backspace => {
+                state.pop_char();
+            }
+            KeyCode::Char(c)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                state.push_char(c);
+            }
+            _ => {}
+        }
+    }
+
+    /// Reads or writes the file the prompt names, then closes the prompt.
+    /// Errors surface as toasts; the editor buffer is unchanged on Save
+    /// failure and on Open failure (so a bad path doesn't blow away
+    /// in-progress work).
+    fn commit_file_prompt(&mut self) {
+        let Some(state) = self.file_prompt.take() else {
+            return;
+        };
+        let trimmed = state.input.trim();
+        if trimmed.is_empty() {
+            self.toast_error("file path is empty".into());
+            return;
+        }
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let path = file_prompt::resolve(trimmed, &cwd);
+        match state.mode {
+            FilePromptMode::Open => match std::fs::read_to_string(&path) {
+                Ok(text) => {
+                    // Normalize CRLF so Windows line endings don't show as
+                    // blank lines in the editor.
+                    let normalized = text.replace("\r\n", "\n");
+                    self.editor.set_text(&normalized);
+                    self.toast_info(format!("opened: {}", path.display()));
+                }
+                Err(e) => {
+                    self.toast_error(format!("open failed: {e}"));
+                }
+            },
+            FilePromptMode::Save => match std::fs::write(&path, self.editor.text()) {
+                Ok(()) => {
+                    self.toast_info(format!("saved: {}", path.display()));
+                }
+                Err(e) => {
+                    self.toast_error(format!("save failed: {e}"));
+                }
+            },
+        }
     }
 
     /// Closes the autocomplete popup if the current prefix is empty or
@@ -1243,6 +1340,125 @@ mod tests {
         let popup = app.autocomplete.as_ref().expect("popup");
         let cands: Vec<String> = popup.candidates().to_vec();
         assert_eq!(cands, vec!["email".to_string()]);
+    }
+
+    fn unique_tmp_path(label: &str) -> std::path::PathBuf {
+        // Combine the label with a uuid so parallel test runs don't
+        // collide on the same temp filename.
+        let id = uuid::Uuid::new_v4();
+        std::env::temp_dir().join(format!("psqlview_r5_{label}_{id}.sql"))
+    }
+
+    #[test]
+    fn ctrl_s_opens_save_prompt_and_writes_file() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        type_str(&mut app, "SELECT 42;");
+
+        app.on_event(AppEvent::Key(key(
+            KeyCode::Char('s'),
+            KeyModifiers::CONTROL,
+        )));
+        let prompt = app.file_prompt.as_ref().expect("save prompt");
+        assert_eq!(prompt.mode, FilePromptMode::Save);
+
+        // Type the absolute path so the test doesn't depend on cwd.
+        let path = unique_tmp_path("save");
+        for c in path.to_string_lossy().chars() {
+            app.on_event(AppEvent::Key(key(KeyCode::Char(c), KeyModifiers::NONE)));
+        }
+        app.on_event(AppEvent::Key(key(KeyCode::Enter, KeyModifiers::NONE)));
+
+        assert!(app.file_prompt.is_none(), "prompt should close on commit");
+        let written = std::fs::read_to_string(&path).expect("file written");
+        assert_eq!(written, "SELECT 42;");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn ctrl_o_opens_open_prompt_and_replaces_buffer() {
+        let path = unique_tmp_path("open");
+        std::fs::write(&path, "SELECT loaded;\r\nFROM disk\r\n").expect("seed file");
+
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        type_str(&mut app, "scratch");
+
+        app.on_event(AppEvent::Key(key(
+            KeyCode::Char('o'),
+            KeyModifiers::CONTROL,
+        )));
+        let prompt = app.file_prompt.as_ref().expect("open prompt");
+        assert_eq!(prompt.mode, FilePromptMode::Open);
+        for c in path.to_string_lossy().chars() {
+            app.on_event(AppEvent::Key(key(KeyCode::Char(c), KeyModifiers::NONE)));
+        }
+        app.on_event(AppEvent::Key(key(KeyCode::Enter, KeyModifiers::NONE)));
+
+        assert!(app.file_prompt.is_none());
+        // CRLF in the file is normalized to LF on load.
+        assert_eq!(app.editor.text(), "SELECT loaded;\nFROM disk\n");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn esc_dismisses_file_prompt_without_writing() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        type_str(&mut app, "x");
+        app.on_event(AppEvent::Key(key(
+            KeyCode::Char('s'),
+            KeyModifiers::CONTROL,
+        )));
+        for c in "/should/not/exist.sql".chars() {
+            app.on_event(AppEvent::Key(key(KeyCode::Char(c), KeyModifiers::NONE)));
+        }
+        app.on_event(AppEvent::Key(key(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(app.file_prompt.is_none());
+        assert!(!std::path::Path::new("/should/not/exist.sql").exists());
+        // Editor buffer untouched.
+        assert_eq!(app.editor.text(), "x");
+    }
+
+    #[test]
+    fn open_failure_sets_error_toast_and_keeps_buffer() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        type_str(&mut app, "keep me");
+        app.on_event(AppEvent::Key(key(
+            KeyCode::Char('o'),
+            KeyModifiers::CONTROL,
+        )));
+        let bogus = unique_tmp_path("missing");
+        for c in bogus.to_string_lossy().chars() {
+            app.on_event(AppEvent::Key(key(KeyCode::Char(c), KeyModifiers::NONE)));
+        }
+        app.on_event(AppEvent::Key(key(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.file_prompt.is_none());
+        assert_eq!(app.editor.text(), "keep me");
+        let toast = app.toast.as_ref().expect("error toast");
+        assert!(toast.is_error);
+        assert!(toast.message.contains("open failed"));
+    }
+
+    #[test]
+    fn file_prompt_swallows_global_keys_while_open() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        app.on_event(AppEvent::Key(key(
+            KeyCode::Char('s'),
+            KeyModifiers::CONTROL,
+        )));
+        // F2 would normally focus the tree pane; while the prompt is open
+        // it must be ignored.
+        app.on_event(AppEvent::Key(key(KeyCode::F(2), KeyModifiers::NONE)));
+        assert!(app.file_prompt.is_some());
+        assert_eq!(app.focus, FocusPane::Editor);
     }
 
     #[test]

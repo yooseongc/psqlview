@@ -197,6 +197,16 @@ top-level `App` never touches the ratatui widgets directly.
   Results pane; absorbs its own Esc/Enter/arrow keys.
 - `cheatsheet.rs` is a static-table overlay listing every keybinding,
   opened by `F1` or `?` outside the editor / search / autocomplete.
+- `file_prompt.rs` is the `Ctrl+O` / `Ctrl+S` inline filename prompt.
+  Owned by `App::file_prompt`; rendered as a 3-row overlay pinned to
+  the bottom of the editor area. While `Some`, it is the highest-
+  priority modal — every key (Esc/Enter/printable/Backspace) routes
+  to it, so even F-keys and global shortcuts don't dismiss it. Path
+  resolution: absolute paths pass through, relative paths are joined
+  onto `std::env::current_dir()`. No `~`, no globbing, no picker.
+  Open normalizes CRLF → LF; Save writes the buffer verbatim. I/O is
+  synchronous (small SQL files); errors surface as toasts and leave
+  the editor buffer unchanged.
 
 Modal layering (highest priority first):
 1. `cheatsheet_open` — swallows all keys until closed.
@@ -212,7 +222,8 @@ Keybinding quick-ref (workspace):
 - `F2`/`F3`/`F4` focus tree/editor/results (also `Alt+1/2/3` backup)
 - `F1` or `?` open cheatsheet
 - Editor: `Tab` autocomplete/indent · `Shift+Tab` outdent (block-aware)
-  · `Ctrl+Up/Down` recall query history
+  · `Ctrl+Up/Down` recall query history · `Ctrl+O`/`Ctrl+S` open/save
+  file (cwd-relative path)
 - Tree: `/` incremental search · `n`/`N` repeat
 - Results: `Enter` row detail · `s` sort current column (Asc→Desc→off)
   · `Ctrl+Left`/`Ctrl+Right` first/last column

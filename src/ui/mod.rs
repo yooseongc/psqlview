@@ -3,6 +3,7 @@ pub mod autocomplete_context;
 pub mod cheatsheet;
 pub mod connect_dialog;
 pub mod editor;
+pub mod file_prompt;
 pub mod results;
 pub mod row_detail;
 pub mod schema_tree;
@@ -95,6 +96,9 @@ fn draw_workspace(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
     if let Some(popup) = &app.autocomplete {
         autocomplete::draw(frame, popup, editor_rect);
+    }
+    if let Some(prompt) = &app.file_prompt {
+        file_prompt::draw(frame, prompt, editor_rect);
     }
 
     status::draw(frame, app, status_area);

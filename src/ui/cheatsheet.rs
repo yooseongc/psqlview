@@ -25,6 +25,7 @@ const ROWS: &[(&str, &str)] = &[
     ("Tab", "autocomplete popup (or 2-space indent)"),
     ("Shift+Tab", "outdent current line"),
     ("Ctrl+Up / Ctrl+Down", "recall previous / next query"),
+    ("Ctrl+O / Ctrl+S", "open / save file (cwd-relative path)"),
     ("Ctrl+Shift+V (terminal)", "paste (bracketed)"),
     ("", ""),
     ("Schema tree", ""),
