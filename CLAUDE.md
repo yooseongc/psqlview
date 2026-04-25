@@ -137,8 +137,12 @@ live session's state.
   - **SELECT / WITH / VALUES / TABLE / SHOW / EXPLAIN / FETCH** → typed
     streaming via `query_raw`, rows converted by `convert_cell` into
     `CellValue` enum (bool, int, float, numeric, text, date, time,
-    timestamp, timestamptz, json/jsonb, uuid, bytea, unsupported).
+    timestamp, timestamptz, json/jsonb, uuid, bytea, inet, unsupported).
     Capped at `ROW_LIMIT = 10_000`.
+  - On error, `DbError::format_detailed_with_sql` builds a multi-line
+    message including SQLSTATE / DETAIL / HINT / a caret-pointed
+    POSITION snippet. `DbError::original_position` exposes just the
+    POSITION number so the editor can jump the caret there.
   - **anything else** → `simple_query` so multi-statement DDL / DML
     works; last `CommandComplete` tag bubbles up to the status bar.
 - `catalog.rs`: four small async functions that back the schema tree.
@@ -156,24 +160,52 @@ top-level `App` never touches the ratatui widgets directly.
 - `schema_tree.rs` stores a nested `Vec<SchemaEntry>` with
   expanded/loaded flags. `flatten()` produces the flat list for
   rendering *and* selection indexing — keep the order consistent
-  between the two, or selection math will desync.
+  between the two, or selection math will desync. Also owns the
+  incremental `/` search state (`search`, `last_search`).
 - `results.rs` computes column widths from the first 256 rows (`min
-  4, max 40`, Unicode-width-aware via `unicode-width`). Don't sort —
-  preserve insertion order so vertical scroll indices stay stable.
+  4, max 40`, Unicode-width-aware via `unicode-width`). The query
+  result is stored verbatim (insertion order); the optional client-
+  side sort (`s`) mutates `current.rows` in place and snapshots the
+  pre-sort order in `original_rows` so it can restore on cycle-off.
+  EXPLAIN-shaped results (single column named `QUERY PLAN`) are
+  detected at `set_result` time and rendered by `draw_explain` with
+  per-line node-name + cost/timing styling.
 - `tui-textarea` owns its own undo stack and cursor; the editor module
-  is a thin wrapper.
+  is a thin wrapper. Light SQL keyword highlighting is provided by
+  feeding a single regex into tui-textarea's `search_pattern` (the
+  `search` cargo feature). Cursor jumps for error POSITIONs use
+  `move_cursor_to_char_position`. Block indent / outdent on a
+  selection is handled via `selected_line_range` + `indent_lines` /
+  `outdent_lines`.
 - `autocomplete.rs` holds `AutocompletePopup` — a prefix-filtered
   candidate list overlaid on the editor. Opened by Tab when a word
   prefix sits at the cursor. Candidates: hard-coded `SQL_KEYWORDS`
-  plus `SchemaTreeState::collect_identifiers()` (schema/table/column
-  names that have been lazily loaded). The popup is owned by `App`,
-  not by the editor, because it needs access to the schema tree.
+  plus `SchemaTreeState::collect_identifiers()`. The popup is owned
+  by `App`, not by the editor, because it needs access to the tree.
+- `row_detail.rs` is a centered overlay that lists every column of
+  the currently-selected result row. Opened by Enter on a populated
+  Results pane; absorbs its own Esc/Enter/arrow keys.
+- `cheatsheet.rs` is a static-table overlay listing every keybinding,
+  opened by `F1` or `?` outside the editor / search / autocomplete.
+
+Modal layering (highest priority first):
+1. `cheatsheet_open` — swallows all keys until closed.
+2. `row_detail.open` — same.
+3. Tree incremental search (`tree.search.is_some()` while focused).
+4. Autocomplete popup (while editor focused).
+5. Running query (Esc → cancel only).
+6. Pane-specific handler.
 
 Keybinding quick-ref (workspace):
-- `F5` / `Ctrl+Enter` run · `Esc` cancel running query
+- `F5` / `Ctrl+Enter` run (selection if active, else whole buffer)
+- `Esc` dismiss toast → cancel query → cancel connect (cascading)
 - `F2`/`F3`/`F4` focus tree/editor/results (also `Alt+1/2/3` backup)
-- `Tab`/`Shift+Tab` cycle focus (Editor: autocomplete or 2-space
-  indent on empty prefix; Shift+Tab outdents)
+- `F1` or `?` open cheatsheet
+- Editor: `Tab` autocomplete/indent · `Shift+Tab` outdent (block-aware)
+  · `Ctrl+Up/Down` recall query history
+- Tree: `/` incremental search · `n`/`N` repeat
+- Results: `Enter` row detail · `s` sort current column (Asc→Desc→off)
+  · `Ctrl+Left`/`Ctrl+Right` first/last column
 - `Ctrl+Q` / `Ctrl+C` quit. `F10` is NOT bound.
 
 ## Conventions
