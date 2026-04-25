@@ -47,6 +47,7 @@ const ROWS: &[(&str, &str)] = &[
     ("Home / End", "first / last row"),
     ("Left Right / hl", "column scroll"),
     ("Ctrl+Left / Ctrl+Right", "first / last column"),
+    ("Ctrl+E", "export current result set to CSV"),
     ("Enter", "row detail view"),
     (
         "s",

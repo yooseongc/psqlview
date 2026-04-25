@@ -21,6 +21,7 @@ use ratatui::Frame;
 pub enum FilePromptMode {
     Open,
     Save,
+    ExportCsv,
 }
 
 impl FilePromptMode {
@@ -28,6 +29,7 @@ impl FilePromptMode {
         match self {
             Self::Open => "Open",
             Self::Save => "Save",
+            Self::ExportCsv => "Export CSV",
         }
     }
 }

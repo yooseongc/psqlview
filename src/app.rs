@@ -12,6 +12,7 @@ use crate::types::ResultSet;
 use crate::ui::autocomplete::{AutocompletePopup, SQL_KEYWORDS};
 use crate::ui::autocomplete_context::{detect_context, extract_aliases, CompletionContext};
 use crate::ui::connect_dialog::ConnectDialogState;
+use crate::ui::csv_export;
 use crate::ui::editor::EditorState;
 use crate::ui::file_prompt::{self, FilePromptMode, FilePromptState};
 use crate::ui::results::ResultsState;
@@ -417,6 +418,20 @@ impl App {
             return;
         }
 
+        // Ctrl+E exports the current result set to a CSV file. Pane-
+        // independent: works whether you're focused on the tree, editor,
+        // or results — the prompt cares about results.current, not focus.
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('e') | KeyCode::Char('E'))
+        {
+            if self.results.current.is_some() {
+                self.open_file_prompt(FilePromptMode::ExportCsv);
+            } else {
+                self.toast_info("no result set to export".into());
+            }
+            return;
+        }
+
         // Ctrl+Up/Down in the editor recalls past queries from session
         // history. Ignored outside the editor so the tree/results panes
         // keep their scroll semantics. Ctrl+O / Ctrl+S open the file
@@ -662,6 +677,22 @@ impl App {
                     self.toast_error(format!("save failed: {e}"));
                 }
             },
+            FilePromptMode::ExportCsv => {
+                let Some(rs) = self.results.current.as_ref() else {
+                    self.toast_error("no result set to export".into());
+                    return;
+                };
+                let res = std::fs::File::create(&path)
+                    .and_then(|mut f| csv_export::write_csv(rs, &mut f));
+                match res {
+                    Ok(()) => self.toast_info(format!(
+                        "exported {} rows to {}",
+                        rs.rows.len(),
+                        path.display()
+                    )),
+                    Err(e) => self.toast_error(format!("export failed: {e}")),
+                }
+            }
         }
     }
 
@@ -1509,6 +1540,65 @@ mod tests {
         let written = std::fs::read_to_string(&path).expect("file written");
         assert_eq!(written, "SELECT 42;");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn ctrl_e_with_result_writes_csv() {
+        use crate::types::{CellValue, ColumnMeta};
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Results;
+        let rs = ResultSet {
+            columns: vec![
+                ColumnMeta {
+                    name: "id".into(),
+                    type_name: "int".into(),
+                },
+                ColumnMeta {
+                    name: "msg".into(),
+                    type_name: "text".into(),
+                },
+            ],
+            rows: vec![
+                vec![CellValue::Int(1), CellValue::Text("a,b".into())],
+                vec![CellValue::Int(2), CellValue::Null],
+            ],
+            ..ResultSet::default()
+        };
+        app.results.set_result(rs);
+
+        app.on_event(AppEvent::Key(key(
+            KeyCode::Char('e'),
+            KeyModifiers::CONTROL,
+        )));
+        let prompt = app.file_prompt.as_ref().expect("export prompt");
+        assert_eq!(prompt.mode, FilePromptMode::ExportCsv);
+
+        let path = unique_tmp_path("export");
+        for c in path.to_string_lossy().chars() {
+            app.on_event(AppEvent::Key(key(KeyCode::Char(c), KeyModifiers::NONE)));
+        }
+        app.on_event(AppEvent::Key(key(KeyCode::Enter, KeyModifiers::NONE)));
+
+        let written = std::fs::read_to_string(&path).expect("csv written");
+        assert_eq!(written, "id,msg\n1,\"a,b\"\n2,\n");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn ctrl_e_without_result_shows_info_toast() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Results;
+        // No results.set_result — current is None.
+        app.on_event(AppEvent::Key(key(
+            KeyCode::Char('e'),
+            KeyModifiers::CONTROL,
+        )));
+        assert!(app.file_prompt.is_none());
+        let toast = app.toast.as_ref().expect("toast set");
+        assert!(!toast.is_error);
+        assert!(toast.message.contains("no result"));
     }
 
     #[test]
