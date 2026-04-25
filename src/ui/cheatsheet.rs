@@ -33,6 +33,10 @@ const ROWS: &[(&str, &str)] = &[
     ("PageUp / PageDown", "page by screenful"),
     ("Home / End", "first / last item"),
     ("Enter", "expand / load"),
+    (
+        "p / Space",
+        "preview rows of selected table (SELECT * LIMIT 200)",
+    ),
     ("/", "incremental search"),
     ("n / N", "repeat last search forward / back"),
     ("", ""),

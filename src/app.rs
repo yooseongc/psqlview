@@ -19,6 +19,28 @@ use crate::ui::row_detail::RowDetailState;
 use crate::ui::schema_tree::SchemaTreeState;
 use crate::ui::PaneRects;
 
+/// Row cap on the synthesized `SELECT *` issued by the tree-preview
+/// shortcut (`p` on a relation). Kept low because the user is browsing,
+/// not querying.
+const PREVIEW_ROW_LIMIT: u32 = 200;
+
+/// Quotes a Postgres identifier per the standard rules: wrap in double
+/// quotes and double any internal quote.
+fn quote_ident(name: &str) -> String {
+    let escaped = name.replace('"', "\"\"");
+    format!("\"{escaped}\"")
+}
+
+/// Builds a preview `SELECT * FROM "schema"."relation" LIMIT n` query.
+fn build_preview_sql(schema: &str, relation: &str, limit: u32) -> String {
+    format!(
+        "SELECT * FROM {}.{} LIMIT {}",
+        quote_ident(schema),
+        quote_ident(relation),
+        limit
+    )
+}
+
 /// Top-level screen the app is rendering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -745,6 +767,7 @@ impl App {
             KeyCode::End => self.tree.jump_to_end(),
             KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => self.expand_current_tree_node(),
             KeyCode::Left | KeyCode::Char('h') => self.tree.collapse_current(),
+            KeyCode::Char('p') | KeyCode::Char(' ') => self.run_preview_for_selected_relation(),
             _ => {}
         }
     }
@@ -844,12 +867,6 @@ impl App {
     }
 
     fn run_current_query(&mut self) {
-        // Grab the client + cancel token up front so we're done with
-        // &self.session before we take &mut self for history/state.
-        let (client, cancel) = match self.session.as_ref() {
-            Some(s) => (s.client(), s.cancel_token()),
-            None => return,
-        };
         // Run just the selected portion when one exists, so users can
         // execute a single statement from a buffer of many.
         let sql = self
@@ -861,6 +878,18 @@ impl App {
             self.toast_info("editor is empty".into());
             return;
         }
+        self.dispatch_sql(sql);
+    }
+
+    /// Spawns a query task for `sql` and updates the running-query state.
+    /// No-op when there is no live session. Used by `run_current_query`,
+    /// the tree-preview shortcut, and any other shortcut that wants to
+    /// run a synthesized query without touching the editor.
+    fn dispatch_sql(&mut self, sql: String) {
+        let (client, cancel) = match self.session.as_ref() {
+            Some(s) => (s.client(), s.cancel_token()),
+            None => return,
+        };
         self.autocomplete = None;
         self.push_history(&sql);
         self.query_status = QueryStatus::Running {
@@ -876,6 +905,20 @@ impl App {
             let r = db::query::execute(client, &sql).await;
             let _ = tx.send(AppEvent::QueryResult(r));
         });
+    }
+
+    /// Builds a `SELECT * FROM "schema"."relation" LIMIT N` query and
+    /// dispatches it. Identifier quoting protects against schemas /
+    /// relation names containing special chars or reserved words.
+    fn run_preview_for_selected_relation(&mut self) {
+        let Some(node) = self.tree.current_node() else {
+            return;
+        };
+        if let crate::ui::schema_tree::NodeRef::Relation { schema, name, .. } = node {
+            let sql = build_preview_sql(&schema, &name, PREVIEW_ROW_LIMIT);
+            self.toast_info(format!("preview: {schema}.{name}"));
+            self.dispatch_sql(sql);
+        }
     }
 
     fn cancel_running_query(&mut self) {
@@ -1017,6 +1060,25 @@ mod tests {
     fn app_with_channel() -> (App, mpsc::UnboundedReceiver<AppEvent>) {
         let (tx, rx) = mpsc::unbounded_channel();
         (App::new(tx), rx)
+    }
+
+    #[test]
+    fn quote_ident_doubles_internal_quotes() {
+        assert_eq!(quote_ident("users"), r#""users""#);
+        assert_eq!(quote_ident("My\"Table"), r#""My""Table""#);
+        assert_eq!(quote_ident("WITH"), r#""WITH""#);
+    }
+
+    #[test]
+    fn build_preview_sql_quotes_both_parts() {
+        assert_eq!(
+            build_preview_sql("public", "users", 200),
+            r#"SELECT * FROM "public"."users" LIMIT 200"#
+        );
+        assert_eq!(
+            build_preview_sql("ns", "with\"quote", 50),
+            r#"SELECT * FROM "ns"."with""quote" LIMIT 50"#
+        );
     }
 
     #[test]
