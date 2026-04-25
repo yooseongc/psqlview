@@ -5,6 +5,7 @@ pub mod editor;
 pub mod results;
 pub mod row_detail;
 pub mod schema_tree;
+pub mod sql_lexer;
 pub mod status;
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};

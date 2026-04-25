@@ -13,6 +13,7 @@ use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
 use super::buffer::{Cursor, TextBuffer};
+use crate::ui::sql_lexer::{tokenize_line, LexState, TokenKind};
 
 /// Pane-internal rendering state that survives across frames: the
 /// vertical scroll offset (top visible row).
@@ -92,13 +93,18 @@ pub fn draw(
 
     let lines = buf.lines();
     let mut frame_lines: Vec<Line<'static>> = Vec::with_capacity(inner.height as usize);
-    for vis_row in 0..(inner.height as usize) {
-        let row = view.scroll_top + vis_row;
-        if row >= lines.len() {
-            frame_lines.push(Line::from(""));
+    // Walk every line from the top so multi-line lex constructs (block
+    // comments, strings spanning newlines) carry their state correctly
+    // by the time we reach the scrolled-into-view region.
+    let mut lex_state = LexState::default();
+    for (row, raw) in lines.iter().enumerate() {
+        if row < view.scroll_top {
+            let _ = tokenize_line(raw, &mut lex_state);
             continue;
         }
-        let raw = &lines[row];
+        if row >= view.scroll_top + (inner.height as usize) {
+            break;
+        }
         let mut spans: Vec<Span<'static>> = Vec::new();
 
         // Gutter: line number, dimmed.
@@ -107,14 +113,21 @@ pub fn draw(
             Style::default().fg(Color::DarkGray),
         ));
 
-        // Body content with selection overlay.
-        push_styled_line(&mut spans, raw, row, selection);
+        // Body content: per-token color + selection bg + cursor-line underline.
+        push_styled_line(
+            &mut spans,
+            raw,
+            row,
+            &mut lex_state,
+            selection,
+            focused && row == cursor.row,
+        );
 
-        let mut line = Line::from(spans);
-        if focused && row == cursor.row {
-            line.style = Style::default().add_modifier(Modifier::UNDERLINED);
-        }
-        frame_lines.push(line);
+        frame_lines.push(Line::from(spans));
+    }
+    // If the buffer has fewer lines than the viewport, pad with blanks.
+    while frame_lines.len() < inner.height as usize {
+        frame_lines.push(Line::from(""));
     }
 
     let p = Paragraph::new(frame_lines);
@@ -130,48 +143,78 @@ pub fn draw(
     }
 }
 
+/// Builds the content portion of a line: tokenizes for syntax color,
+/// overlays the selection background, optionally adds underline for the
+/// cursor line, and merges adjacent same-style chars into Spans.
 fn push_styled_line(
     spans: &mut Vec<Span<'static>>,
     line: &str,
     row: usize,
+    lex_state: &mut LexState,
     selection: Option<(Cursor, Cursor)>,
+    cursor_line: bool,
 ) {
-    // Selection overlay: split the line into pre / sel / post slices.
-    let (sel_lo, sel_hi) = match selection {
-        Some((s, e)) => row_selection_range(row, s, e, line.chars().count()),
+    let chars: Vec<char> = line.chars().collect();
+    let n = chars.len();
+
+    // 1. Per-char foreground style from the tokenizer.
+    let default_style = Style::default().fg(Color::White);
+    let mut styles: Vec<Style> = vec![default_style; n];
+    let tokens = tokenize_line(line, lex_state);
+    for tok in &tokens {
+        let s = style_for_kind(tok.kind);
+        let end = (tok.start_col + tok.len).min(n);
+        for slot in &mut styles[tok.start_col..end] {
+            *slot = s;
+        }
+    }
+
+    // 2. Selection background.
+    let (lo_opt, hi_opt) = match selection {
+        Some((s, e)) => row_selection_range(row, s, e, n),
         None => (None, None),
     };
+    if lo_opt.is_some() || hi_opt.is_some() {
+        let lo = lo_opt.unwrap_or(0);
+        let hi = hi_opt.unwrap_or(n);
+        for slot in &mut styles[lo..hi.min(n)] {
+            *slot = slot.bg(Color::DarkGray);
+        }
+    }
 
-    let chars: Vec<char> = line.chars().collect();
-    let render_slice = |start: usize, end: usize, hi: bool, out: &mut Vec<Span<'static>>| {
-        if start >= end {
-            return;
+    // 3. Cursor-line underline (additive to whatever color the token had).
+    if cursor_line {
+        for slot in &mut styles {
+            *slot = slot.add_modifier(Modifier::UNDERLINED);
         }
-        let text: String = chars[start..end].iter().collect();
-        let mut style = Style::default().fg(Color::White);
-        if hi {
-            style = style.bg(Color::DarkGray);
-        }
-        out.push(Span::styled(text, style));
-    };
+    }
 
-    let total = chars.len();
-    match (sel_lo, sel_hi) {
-        (Some(lo), Some(hi)) => {
-            render_slice(0, lo, false, spans);
-            render_slice(lo, hi, true, spans);
-            render_slice(hi, total, false, spans);
+    // 4. Merge adjacent same-style runs into Spans.
+    let mut i = 0;
+    while i < n {
+        let s = styles[i];
+        let start = i;
+        while i < n && styles[i] == s {
+            i += 1;
         }
-        (Some(lo), None) => {
-            render_slice(0, lo, false, spans);
-            render_slice(lo, total, true, spans);
-        }
-        (None, Some(hi)) => {
-            render_slice(0, hi, true, spans);
-            render_slice(hi, total, false, spans);
-        }
-        (None, None) => {
-            render_slice(0, total, false, spans);
+        let text: String = chars[start..i].iter().collect();
+        spans.push(Span::styled(text, s));
+    }
+}
+
+fn style_for_kind(kind: TokenKind) -> Style {
+    match kind {
+        TokenKind::Keyword => Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+        TokenKind::StringLit => Style::default().fg(Color::Green),
+        TokenKind::Number => Style::default().fg(Color::Yellow),
+        TokenKind::LineComment | TokenKind::BlockComment => Style::default().fg(Color::DarkGray),
+        TokenKind::QuotedIdent => Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::UNDERLINED),
+        TokenKind::Identifier | TokenKind::Operator | TokenKind::Whitespace => {
+            Style::default().fg(Color::White)
         }
     }
 }
