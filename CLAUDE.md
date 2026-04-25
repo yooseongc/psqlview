@@ -224,9 +224,12 @@ Keybinding quick-ref (workspace):
 - Editor: `Tab` autocomplete/indent · `Shift+Tab` outdent (block-aware)
   · `Ctrl+Up/Down` recall query history · `Ctrl+O`/`Ctrl+S` open/save
   file (cwd-relative path)
-- Tree: `/` incremental search · `n`/`N` repeat
+- Tree: `/` incremental search · `n`/`N` repeat · `p` / `Space` preview
+  rows of selected table · `D` show synthesized DDL
 - Results: `Enter` row detail · `s` sort current column (Asc→Desc→off)
-  · `Ctrl+Left`/`Ctrl+Right` first/last column
+  · `Ctrl+Left`/`Ctrl+Right` first/last column · `y` / `Y` copy cell /
+  row (OSC 52 clipboard) · `R` re-run last query
+- Workspace-wide: `Ctrl+E` export current result set to CSV
 - `Ctrl+Q` / `Ctrl+C` quit. `F10` is NOT bound.
 
 ## Conventions
