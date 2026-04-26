@@ -10,6 +10,12 @@
 
 use std::path::PathBuf;
 
+use ratatui::layout::Rect;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
+use ratatui::Frame;
+
 use super::EditorState;
 
 #[derive(Default)]
@@ -43,6 +49,36 @@ impl TabSlot {
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "untitled".to_string())
     }
+}
+
+/// One-row tab strip rendered above the editor's outer block. Each
+/// tab shows `"<n>: <title>[*]"` — `n` is 1-based, the asterisk
+/// marks an unsaved buffer. The active tab is bold-cyan; inactive
+/// tabs are dimmed. Long titles get clipped by the Paragraph itself
+/// (no marquee scroll).
+pub fn draw(frame: &mut Frame<'_>, tabs: &[TabSlot], active: usize, area: Rect) {
+    if area.height == 0 || tabs.is_empty() {
+        return;
+    }
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(tabs.len() * 2);
+    for (i, tab) in tabs.iter().enumerate() {
+        let mark = if tab.dirty { "*" } else { "" };
+        let label = format!(" {}: {}{} ", i + 1, tab.title(), mark);
+        let style = if i == active {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        spans.push(Span::styled(label, style));
+        if i + 1 < tabs.len() {
+            spans.push(Span::raw(" "));
+        }
+    }
+    let paragraph = Paragraph::new(Line::from(spans));
+    frame.render_widget(paragraph, area);
 }
 
 #[cfg(test)]

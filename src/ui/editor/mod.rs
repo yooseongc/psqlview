@@ -120,20 +120,27 @@ impl EditorState {
     /// Routes a key event through the edit layer, plus Ctrl+Z / Ctrl+Y
     /// for undo / redo. Records an undo snapshot on every text-changing
     /// keystroke.
-    pub fn handle_key(&mut self, key: KeyEvent) {
+    ///
+    /// Returns `true` when the buffer text changed — callers use this
+    /// to mark the active tab dirty without false-positives from
+    /// arrow-key / scroll navigation. Undo / redo always return `true`
+    /// because the buffer was replaced.
+    pub fn handle_key(&mut self, key: KeyEvent) -> bool {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
                 KeyCode::Char('z') | KeyCode::Char('Z') => {
                     if let Some(prev) = self.undo.undo(&self.buf) {
                         self.buf = prev;
+                        return true;
                     }
-                    return;
+                    return false;
                 }
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     if let Some(next) = self.undo.redo(&self.buf) {
                         self.buf = next;
+                        return true;
                     }
-                    return;
+                    return false;
                 }
                 _ => {}
             }
@@ -142,6 +149,9 @@ impl EditorState {
         let outcome = edit::handle_key(&mut self.buf, key);
         if outcome == EditOutcome::Changed {
             self.undo.record(&pre);
+            true
+        } else {
+            false
         }
     }
 

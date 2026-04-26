@@ -168,6 +168,12 @@ pub struct App {
     /// prompt is modal at the application level — every key routes to it.
     pub file_prompt: Option<FilePromptState>,
 
+    /// Two-strike confirm for closing a dirty tab. First `Ctrl+W` on a
+    /// dirty tab records `(tab_idx, when)` and shows a toast; a second
+    /// `Ctrl+W` on the same tab within 3 seconds discards. Any other
+    /// keystroke clears the pending state.
+    pub pending_tab_close: Option<(usize, Instant)>,
+
     /// SQL of the most recently executed query. Retained so error renderers
     /// can place a caret at the reported POSITION.
     pub last_run_sql: Option<String>,
@@ -212,6 +218,7 @@ impl App {
             row_detail: RowDetailState::default(),
             cheatsheet_open: false,
             file_prompt: None,
+            pending_tab_close: None,
             last_run_sql: None,
             last_ddl_target: None,
             history: VecDeque::new(),
@@ -232,6 +239,87 @@ impl App {
     /// Borrow the active tab's editor mutably.
     pub fn editor_mut(&mut self) -> &mut EditorState {
         &mut self.tabs[self.active_tab].editor
+    }
+
+    // ---- tab management -------------------------------------------
+
+    /// Mark the active tab as dirty (unsaved). Called after any edit
+    /// keystroke; idempotent.
+    fn mark_active_dirty(&mut self) {
+        self.tabs[self.active_tab].dirty = true;
+    }
+
+    /// Pre-tab-switch cleanup: close popups / overlays whose state is
+    /// tied to the buffer that's about to be backgrounded.
+    fn switch_tab_cleanup(&mut self) {
+        self.autocomplete = None;
+        self.last_ddl_target = None;
+        self.pending_tab_close = None;
+    }
+
+    /// Opens a fresh empty tab and makes it active.
+    pub fn new_tab(&mut self) {
+        self.switch_tab_cleanup();
+        self.tabs.push(TabSlot::new());
+        self.active_tab = self.tabs.len() - 1;
+    }
+
+    /// Cycles the active tab by `delta` (positive = next, negative =
+    /// previous). Wraps around either end.
+    pub fn cycle_tab(&mut self, delta: isize) {
+        let n = self.tabs.len() as isize;
+        if n <= 1 {
+            return;
+        }
+        let next = ((self.active_tab as isize + delta).rem_euclid(n)) as usize;
+        if next != self.active_tab {
+            self.switch_tab_cleanup();
+            self.active_tab = next;
+        }
+    }
+
+    /// Jumps to tab `idx` if it exists; no-op otherwise.
+    pub fn jump_tab(&mut self, idx: usize) {
+        if idx >= self.tabs.len() || idx == self.active_tab {
+            return;
+        }
+        self.switch_tab_cleanup();
+        self.active_tab = idx;
+    }
+
+    /// Attempts to close the active tab. Dirty tabs require a
+    /// "double-press within 3 s" confirmation: the first call sets
+    /// `pending_tab_close` + toast, the second within the window
+    /// discards.
+    pub fn close_active_tab(&mut self) {
+        let idx = self.active_tab;
+        if !self.tabs[idx].dirty {
+            self.do_close_tab(idx);
+            return;
+        }
+        let now = Instant::now();
+        if let Some((pending_idx, ts)) = self.pending_tab_close {
+            if pending_idx == idx && now.duration_since(ts) < Duration::from_secs(3) {
+                self.pending_tab_close = None;
+                self.do_close_tab(idx);
+                return;
+            }
+        }
+        self.pending_tab_close = Some((idx, now));
+        self.toast_info("unsaved changes — Ctrl+W again to discard".into());
+    }
+
+    fn do_close_tab(&mut self, idx: usize) {
+        self.tabs.remove(idx);
+        if self.tabs.is_empty() {
+            // The editor pane is never empty — refill with a fresh
+            // untitled tab.
+            self.tabs.push(TabSlot::new());
+            self.active_tab = 0;
+        } else if self.active_tab >= self.tabs.len() {
+            self.active_tab = self.tabs.len() - 1;
+        }
+        self.switch_tab_cleanup();
     }
 
     pub fn on_event(&mut self, ev: AppEvent) {
@@ -323,6 +411,7 @@ impl App {
             return;
         }
         self.editor_mut().insert_str(&s);
+        self.mark_active_dirty();
     }
 
     fn on_tick(&mut self) {
@@ -452,6 +541,14 @@ impl App {
             return;
         }
 
+        // Any keystroke other than Ctrl+W cancels a pending dirty-tab
+        // close confirmation. The first-strike toast auto-expires.
+        let is_ctrl_w = key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('w') | KeyCode::Char('W'));
+        if !is_ctrl_w {
+            self.pending_tab_close = None;
+        }
+
         // Incremental search in the tree pane absorbs every key until
         // the user commits (Enter) or cancels (Esc). Otherwise Tab would
         // cycle focus out mid-search, F5 would run a query, etc.
@@ -485,6 +582,43 @@ impl App {
                 self.toast_info("no result set to export".into());
             }
             return;
+        }
+
+        // Editor-pane tab management. Pane-independent — the tab bar
+        // belongs to the editor pane but we don't gate on focus so a
+        // user driving the tree / results pane can still create a
+        // scratch tab without first switching focus.
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('t') | KeyCode::Char('T') => {
+                    self.new_tab();
+                    self.focus = FocusPane::Editor;
+                    return;
+                }
+                KeyCode::Char('w') | KeyCode::Char('W') => {
+                    self.close_active_tab();
+                    return;
+                }
+                // Ctrl+] / Ctrl+PageDown → next tab, Ctrl+[ /
+                // Ctrl+PageUp → previous. Ctrl+[ is the same byte as
+                // Esc on standard VT; the kitty-keyboard-protocol push
+                // in main.rs disambiguates on supported terminals.
+                // Ctrl+PageUp/Down is the universal fallback.
+                KeyCode::Char(']') | KeyCode::PageDown => {
+                    self.cycle_tab(1);
+                    return;
+                }
+                KeyCode::Char('[') | KeyCode::PageUp => {
+                    self.cycle_tab(-1);
+                    return;
+                }
+                KeyCode::Char(c @ '1'..='9') => {
+                    let idx = (c as u8 - b'1') as usize;
+                    self.jump_tab(idx);
+                    return;
+                }
+                _ => {}
+            }
         }
 
         // Ctrl+Up/Down in the editor recalls past queries from session
@@ -537,6 +671,7 @@ impl App {
                     } else {
                         self.editor_mut().outdent_current_line();
                     }
+                    self.mark_active_dirty();
                 } else {
                     self.focus = match self.focus {
                         FocusPane::Tree => FocusPane::Results,
@@ -547,7 +682,9 @@ impl App {
             }
             _ => match self.focus {
                 FocusPane::Editor => {
-                    self.editor_mut().handle_key(key);
+                    if self.editor_mut().handle_key(key) {
+                        self.mark_active_dirty();
+                    }
                     // Any direct edit invalidates an in-progress history
                     // walk; user is no longer just browsing.
                     self.history_cursor = None;
@@ -602,6 +739,7 @@ impl App {
         if let Some((s, e)) = self.editor().selected_line_range() {
             if e > s {
                 self.editor_mut().indent_lines(s, e);
+                self.mark_active_dirty();
                 return;
             }
         }
@@ -622,6 +760,7 @@ impl App {
         let context_narrows = !matches!(ctx, CompletionContext::Default);
         if prefix.is_empty() && !context_narrows {
             self.editor_mut().insert_spaces(2);
+            self.mark_active_dirty();
             return;
         }
         let candidates = self.candidates_for_context(&ctx);
@@ -632,7 +771,10 @@ impl App {
         };
         match popup {
             Some(popup) => self.autocomplete = Some(popup),
-            None => self.editor_mut().insert_spaces(2),
+            None => {
+                self.editor_mut().insert_spaces(2);
+                self.mark_active_dirty();
+            }
         }
     }
 
@@ -766,6 +908,9 @@ impl App {
                     // blank lines in the editor.
                     let normalized = text.replace("\r\n", "\n");
                     self.editor_mut().set_text(&normalized);
+                    let active = self.active_tab;
+                    self.tabs[active].path = Some(path.clone());
+                    self.tabs[active].dirty = false;
                     self.toast_info(format!("opened: {}", path.display()));
                 }
                 Err(e) => {
@@ -774,6 +919,9 @@ impl App {
             },
             FilePromptMode::Save => match std::fs::write(&path, self.editor().text()) {
                 Ok(()) => {
+                    let active = self.active_tab;
+                    self.tabs[active].path = Some(path.clone());
+                    self.tabs[active].dirty = false;
                     self.toast_info(format!("saved: {}", path.display()));
                 }
                 Err(e) => {
@@ -828,6 +976,7 @@ impl App {
             KeyCode::Tab | KeyCode::Enter if key.modifiers.is_empty() => {
                 if let Some(pick) = popup.current().map(str::to_string) {
                     self.editor_mut().replace_word_prefix(&pick);
+                    self.mark_active_dirty();
                 }
                 self.autocomplete = None;
                 true
@@ -840,7 +989,9 @@ impl App {
                 if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
             {
                 // Let the editor insert the character, then extend the filter.
-                self.editor_mut().handle_key(key);
+                if self.editor_mut().handle_key(key) {
+                    self.mark_active_dirty();
+                }
                 if let Some(popup) = self.autocomplete.as_mut() {
                     popup.extend_prefix(c);
                 }
@@ -848,7 +999,9 @@ impl App {
                 true
             }
             KeyCode::Backspace => {
-                self.editor_mut().handle_key(key);
+                if self.editor_mut().handle_key(key) {
+                    self.mark_active_dirty();
+                }
                 if let Some(popup) = self.autocomplete.as_mut() {
                     popup.shrink_prefix();
                 }
@@ -1275,6 +1428,7 @@ impl App {
         };
         if let Some(entry) = self.history.get(next).cloned() {
             self.editor_mut().set_text(&entry);
+            self.mark_active_dirty();
             self.history_cursor = Some(next);
         }
     }
@@ -1285,11 +1439,13 @@ impl App {
         let Some(i) = self.history_cursor else { return };
         if i == 0 {
             self.editor_mut().set_text("");
+            self.mark_active_dirty();
             self.history_cursor = None;
         } else {
             let new = i - 1;
             if let Some(entry) = self.history.get(new).cloned() {
                 self.editor_mut().set_text(&entry);
+                self.mark_active_dirty();
                 self.history_cursor = Some(new);
             }
         }
@@ -1503,6 +1659,236 @@ mod tests {
         app.editor_mut().set_text("abc");
         assert_eq!(app.editor().text(), "abc");
         assert_eq!(app.tabs[app.active_tab].editor.text(), "abc");
+    }
+
+    #[test]
+    fn new_tab_appends_and_activates() {
+        let (mut app, _rx) = app_with_channel();
+        app.editor_mut().set_text("first");
+        app.new_tab();
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.active_tab, 1);
+        assert_eq!(app.editor().text(), "");
+        // First tab's content survives.
+        assert_eq!(app.tabs[0].editor.text(), "first");
+    }
+
+    #[test]
+    fn cycle_tab_wraps_in_either_direction() {
+        let (mut app, _rx) = app_with_channel();
+        app.new_tab();
+        app.new_tab();
+        // tabs.len() == 3, active = 2
+        app.cycle_tab(1);
+        assert_eq!(app.active_tab, 0); // wrapped
+        app.cycle_tab(-1);
+        assert_eq!(app.active_tab, 2); // wrapped backwards
+    }
+
+    #[test]
+    fn cycle_tab_with_one_tab_is_noop() {
+        let (mut app, _rx) = app_with_channel();
+        app.cycle_tab(1);
+        assert_eq!(app.active_tab, 0);
+        app.cycle_tab(-1);
+        assert_eq!(app.active_tab, 0);
+    }
+
+    #[test]
+    fn jump_tab_ignores_invalid_index() {
+        let (mut app, _rx) = app_with_channel();
+        app.new_tab();
+        app.jump_tab(99);
+        assert_eq!(app.active_tab, 1);
+    }
+
+    #[test]
+    fn close_clean_tab_drops_it_immediately() {
+        let (mut app, _rx) = app_with_channel();
+        app.new_tab();
+        app.editor_mut().set_text("scratch");
+        app.tabs[app.active_tab].dirty = false; // explicit: clean
+        app.close_active_tab();
+        assert_eq!(app.tabs.len(), 1);
+        assert!(app.pending_tab_close.is_none());
+    }
+
+    #[test]
+    fn close_dirty_tab_requires_two_strikes() {
+        let (mut app, _rx) = app_with_channel();
+        app.new_tab();
+        app.tabs[app.active_tab].dirty = true;
+        // First strike — toast, no close.
+        app.close_active_tab();
+        assert_eq!(app.tabs.len(), 2);
+        assert!(app.pending_tab_close.is_some());
+        let toast = app.toast.as_ref().expect("toast set");
+        assert!(toast.message.contains("unsaved"));
+        // Second strike within window — closes.
+        app.close_active_tab();
+        assert_eq!(app.tabs.len(), 1);
+        assert!(app.pending_tab_close.is_none());
+    }
+
+    #[test]
+    fn close_dirty_tab_resets_pending_after_window() {
+        let (mut app, _rx) = app_with_channel();
+        app.new_tab();
+        app.tabs[app.active_tab].dirty = true;
+        app.close_active_tab();
+        // Force the pending timestamp to look stale.
+        let (idx, _) = app.pending_tab_close.unwrap();
+        app.pending_tab_close = Some((idx, Instant::now() - Duration::from_secs(10)));
+        // Second strike past the 3s window resets to "first strike",
+        // not a close.
+        app.close_active_tab();
+        assert_eq!(app.tabs.len(), 2);
+        assert!(app.pending_tab_close.is_some());
+    }
+
+    #[test]
+    fn closing_only_tab_replaces_with_empty() {
+        let (mut app, _rx) = app_with_channel();
+        app.editor_mut().set_text("only");
+        // Force dirty=false so it closes immediately.
+        app.tabs[0].dirty = false;
+        app.close_active_tab();
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.editor().text(), "");
+        assert_eq!(app.active_tab, 0);
+    }
+
+    #[test]
+    fn editing_marks_active_tab_dirty() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        assert!(!app.tabs[0].dirty);
+        type_str(&mut app, "x");
+        assert!(app.tabs[0].dirty);
+    }
+
+    #[test]
+    fn navigation_keys_do_not_dirty_a_clean_tab() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        // Right arrow on an empty buffer is a no-op edit; dirty stays
+        // false. (Left/Right at position 0 / end are also no-ops.)
+        app.on_event(AppEvent::Key(key(KeyCode::Right, KeyModifiers::NONE)));
+        assert!(!app.tabs[0].dirty);
+    }
+
+    #[test]
+    fn save_clears_dirty_and_sets_path() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        type_str(&mut app, "SELECT 1;");
+        assert!(app.tabs[0].dirty);
+
+        app.on_event(AppEvent::Key(key(
+            KeyCode::Char('s'),
+            KeyModifiers::CONTROL,
+        )));
+        let path = unique_tmp_path("r2save");
+        for c in path.to_string_lossy().chars() {
+            app.on_event(AppEvent::Key(key(KeyCode::Char(c), KeyModifiers::NONE)));
+        }
+        app.on_event(AppEvent::Key(key(KeyCode::Enter, KeyModifiers::NONE)));
+
+        assert!(!app.tabs[0].dirty);
+        assert_eq!(app.tabs[0].path.as_deref(), Some(path.as_path()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn open_clears_dirty_and_sets_path() {
+        let path = unique_tmp_path("r2open");
+        std::fs::write(&path, "SELECT loaded;\n").unwrap();
+
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        type_str(&mut app, "scratch");
+        app.on_event(AppEvent::Key(key(
+            KeyCode::Char('o'),
+            KeyModifiers::CONTROL,
+        )));
+        for c in path.to_string_lossy().chars() {
+            app.on_event(AppEvent::Key(key(KeyCode::Char(c), KeyModifiers::NONE)));
+        }
+        app.on_event(AppEvent::Key(key(KeyCode::Enter, KeyModifiers::NONE)));
+
+        assert!(!app.tabs[0].dirty);
+        assert_eq!(app.tabs[0].path.as_deref(), Some(path.as_path()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn ctrl_t_creates_new_tab_and_focuses_editor() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Tree;
+        app.on_event(AppEvent::Key(key(
+            KeyCode::Char('t'),
+            KeyModifiers::CONTROL,
+        )));
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.active_tab, 1);
+        assert_eq!(app.focus, FocusPane::Editor);
+    }
+
+    #[test]
+    fn ctrl_digit_jumps_to_tab() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        app.new_tab();
+        app.new_tab(); // tabs = 3, active = 2
+        app.on_event(AppEvent::Key(key(
+            KeyCode::Char('1'),
+            KeyModifiers::CONTROL,
+        )));
+        assert_eq!(app.active_tab, 0);
+        app.on_event(AppEvent::Key(key(
+            KeyCode::Char('3'),
+            KeyModifiers::CONTROL,
+        )));
+        assert_eq!(app.active_tab, 2);
+        // Out-of-range is silently ignored.
+        app.on_event(AppEvent::Key(key(
+            KeyCode::Char('9'),
+            KeyModifiers::CONTROL,
+        )));
+        assert_eq!(app.active_tab, 2);
+    }
+
+    #[test]
+    fn ctrl_pagedown_cycles_forward() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        app.new_tab(); // tabs = 2, active = 1
+        app.on_event(AppEvent::Key(key(KeyCode::PageDown, KeyModifiers::CONTROL)));
+        assert_eq!(app.active_tab, 0); // wrap from 1 → 0
+    }
+
+    #[test]
+    fn other_key_clears_pending_tab_close() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        app.new_tab();
+        app.tabs[app.active_tab].dirty = true;
+        app.on_event(AppEvent::Key(key(
+            KeyCode::Char('w'),
+            KeyModifiers::CONTROL,
+        )));
+        assert!(app.pending_tab_close.is_some());
+        // Any non-Ctrl+W key clears it.
+        app.on_event(AppEvent::Key(key(KeyCode::Char('a'), KeyModifiers::NONE)));
+        assert!(app.pending_tab_close.is_none());
     }
 
     #[test]

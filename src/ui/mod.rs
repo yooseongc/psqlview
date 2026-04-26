@@ -83,7 +83,37 @@ fn draw_workspace(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         tree_rect,
     );
     let editor_focused = app.focus == FocusPane::Editor;
-    editor::draw(frame, app.editor_mut(), editor_focused, editor_rect);
+    // Slice off the top row of the editor area for the tab bar. When
+    // the pane is too short for both, the editor body wins and the bar
+    // is skipped.
+    let (tabs_rect, editor_inner_rect) = if editor_rect.height >= 4 {
+        (
+            Rect {
+                x: editor_rect.x,
+                y: editor_rect.y,
+                width: editor_rect.width,
+                height: 1,
+            },
+            Rect {
+                x: editor_rect.x,
+                y: editor_rect.y + 1,
+                width: editor_rect.width,
+                height: editor_rect.height - 1,
+            },
+        )
+    } else {
+        (
+            Rect {
+                x: editor_rect.x,
+                y: editor_rect.y,
+                width: editor_rect.width,
+                height: 0,
+            },
+            editor_rect,
+        )
+    };
+    editor::tab::draw(frame, &app.tabs, app.active_tab, tabs_rect);
+    editor::draw(frame, app.editor_mut(), editor_focused, editor_inner_rect);
     results::draw(
         frame,
         &mut app.results,
