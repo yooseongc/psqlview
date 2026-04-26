@@ -9,12 +9,12 @@ use crate::db::catalog::RelationKind;
 use crate::db::{self, catalog, Session};
 use crate::event::AppEvent;
 use crate::ui::autocomplete::AutocompletePopup;
+use crate::ui::command_line::CommandLineState;
 use crate::ui::connect_dialog::ConnectDialogState;
 use crate::ui::editor::tab::{CloseOutcome, Tabs};
 use crate::ui::editor::EditorState;
 use crate::ui::file_prompt::FilePromptState;
 use crate::ui::find::FindState;
-use crate::ui::goto_line::GotoLineState;
 use crate::ui::results::ResultsState;
 use crate::ui::row_detail::RowDetailState;
 use crate::ui::schema_tree::SchemaTreeState;
@@ -108,10 +108,11 @@ pub struct App {
     /// prompt is modal at the application level — every key routes to it.
     pub file_prompt: Option<FilePromptState>,
 
-    /// `Ctrl+G` inline goto-line prompt. Slotted between `file_prompt`
-    /// and `find` in the modal precedence chain. Only digits / Enter /
-    /// Backspace / Esc reach it.
-    pub goto_line: Option<GotoLineState>,
+    /// `:` command line — single-line ex prompt. While `Some`, every
+    /// editor key routes to it. Slotted between `file_prompt` and
+    /// `find` in the modal precedence chain. `Ctrl+G` opens it as
+    /// well, since `:42` replaces the v0.4 goto-line overlay.
+    pub command_line: Option<CommandLineState>,
 
     /// `Ctrl+F` find / `Ctrl+H` find-replace overlay. While `Some`,
     /// it absorbs editing keystrokes (text into the needle, F3 / Enter
@@ -162,7 +163,7 @@ impl App {
             row_detail: RowDetailState::default(),
             cheatsheet_open: false,
             file_prompt: None,
-            goto_line: None,
+            command_line: None,
             find: None,
             last_run_sql: None,
             last_ddl_target: None,
@@ -205,7 +206,7 @@ impl App {
         self.autocomplete = None;
         self.last_ddl_target = None;
         self.find = None;
-        self.goto_line = None;
+        self.command_line = None;
     }
 
     pub fn new_tab(&mut self) {
@@ -956,7 +957,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_g_opens_goto_line_overlay() {
+    fn ctrl_g_opens_command_line() {
         let (mut app, _rx) = app_with_channel();
         app.screen = Screen::Workspace;
         app.focus = FocusPane::Editor;
@@ -964,12 +965,12 @@ mod tests {
             KeyCode::Char('g'),
             KeyModifiers::CONTROL,
         )));
-        assert!(app.goto_line.is_some());
-        assert_eq!(app.goto_line.as_ref().unwrap().input(), "");
+        assert!(app.command_line.is_some());
+        assert_eq!(app.command_line.as_ref().unwrap().input, "");
     }
 
     #[test]
-    fn goto_line_jumps_active_editor_on_enter() {
+    fn ctrl_g_42_enter_jumps_to_line() {
         let (mut app, _rx) = app_with_channel();
         app.screen = Screen::Workspace;
         app.focus = FocusPane::Editor;
@@ -982,17 +983,16 @@ mod tests {
             app.on_event(AppEvent::Key(key(KeyCode::Char(c), KeyModifiers::NONE)));
         }
         app.on_event(AppEvent::Key(key(KeyCode::Enter, KeyModifiers::NONE)));
-        assert!(app.goto_line.is_none());
+        assert!(app.command_line.is_none());
         assert_eq!(app.editor().cursor_line_col(), (3, 1));
     }
 
     #[test]
-    fn goto_line_esc_closes_without_jumping() {
+    fn command_line_esc_closes_without_dispatching() {
         let (mut app, _rx) = app_with_channel();
         app.screen = Screen::Workspace;
         app.focus = FocusPane::Editor;
         app.editor_mut().set_text("a\nb\nc");
-        // Cursor starts at end-of-buffer after set_text. Capture for assertion.
         let before = app.editor().cursor_line_col();
         app.on_event(AppEvent::Key(key(
             KeyCode::Char('g'),
@@ -1002,12 +1002,12 @@ mod tests {
             app.on_event(AppEvent::Key(key(KeyCode::Char(c), KeyModifiers::NONE)));
         }
         app.on_event(AppEvent::Key(key(KeyCode::Esc, KeyModifiers::NONE)));
-        assert!(app.goto_line.is_none());
+        assert!(app.command_line.is_none());
         assert_eq!(app.editor().cursor_line_col(), before);
     }
 
     #[test]
-    fn goto_line_swallows_non_digit_keys() {
+    fn command_line_swallows_global_keys_while_open() {
         let (mut app, _rx) = app_with_channel();
         app.screen = Screen::Workspace;
         app.focus = FocusPane::Editor;
@@ -1015,12 +1015,11 @@ mod tests {
             KeyCode::Char('g'),
             KeyModifiers::CONTROL,
         )));
-        // Letters / F-keys / Esc-equivalents don't dismiss; only Esc / Enter do.
+        // F2 normally focuses the tree pane; while command line is open
+        // it must be absorbed.
         app.on_event(AppEvent::Key(key(KeyCode::F(2), KeyModifiers::NONE)));
-        assert!(app.goto_line.is_some());
-        // Letter is ignored; input stays empty.
-        app.on_event(AppEvent::Key(key(KeyCode::Char('q'), KeyModifiers::NONE)));
-        assert_eq!(app.goto_line.as_ref().unwrap().input(), "");
+        assert!(app.command_line.is_some());
+        assert_eq!(app.focus, FocusPane::Editor);
     }
 
     #[test]
@@ -1755,5 +1754,131 @@ mod tests {
         assert!(app.find.is_none());
         assert_eq!(app.tabs.list[0].last_search.as_deref(), Some("foo"));
         assert!(app.tabs.list[0].last_search_backward);
+    }
+
+    // ---- `:` command line (R6) -------------------------------------
+
+    fn enter_normal_in_editor(app: &mut App) {
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        app.on_event(AppEvent::Key(key(KeyCode::Esc, KeyModifiers::NONE)));
+    }
+
+    fn run_command(app: &mut App, cmd: &str) {
+        app.on_event(AppEvent::Key(key(KeyCode::Char(':'), KeyModifiers::SHIFT)));
+        for c in cmd.chars() {
+            let mods = if c.is_ascii_uppercase() {
+                KeyModifiers::SHIFT
+            } else {
+                KeyModifiers::NONE
+            };
+            app.on_event(AppEvent::Key(key(KeyCode::Char(c), mods)));
+        }
+        app.on_event(AppEvent::Key(key(KeyCode::Enter, KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn colon_in_normal_mode_opens_command_line() {
+        let (mut app, _rx) = app_with_channel();
+        enter_normal_in_editor(&mut app);
+        app.on_event(AppEvent::Key(key(KeyCode::Char(':'), KeyModifiers::SHIFT)));
+        assert!(app.command_line.is_some());
+        assert_eq!(app.command_line.as_ref().unwrap().input, "");
+    }
+
+    #[test]
+    fn colon_42_jumps_to_line() {
+        let (mut app, _rx) = app_with_channel();
+        app.editor_mut().set_text("a\nb\nc\nd\ne");
+        enter_normal_in_editor(&mut app);
+        run_command(&mut app, "3");
+        assert!(app.command_line.is_none());
+        assert_eq!(app.editor().cursor_line_col(), (3, 1));
+    }
+
+    #[test]
+    fn colon_subst_current_line_first_match() {
+        let (mut app, _rx) = app_with_channel();
+        // set_text resets the cursor to (0, 0); subst on the current
+        // line (row 0) replaces only the first occurrence of `b`.
+        app.editor_mut().set_text("a b b\nc c c");
+        enter_normal_in_editor(&mut app);
+        run_command(&mut app, "s/b/X/");
+        assert_eq!(app.editor().text(), "a X b\nc c c");
+    }
+
+    #[test]
+    fn colon_subst_global_replaces_all_on_current_line() {
+        let (mut app, _rx) = app_with_channel();
+        app.editor_mut().set_text("foo foo foo");
+        enter_normal_in_editor(&mut app);
+        run_command(&mut app, "s/foo/X/g");
+        assert_eq!(app.editor().text(), "X X X");
+    }
+
+    #[test]
+    fn colon_percent_subst_global_replaces_buffer_wide() {
+        let (mut app, _rx) = app_with_channel();
+        app.editor_mut().set_text("foo bar\nfoo baz\nbar foo");
+        enter_normal_in_editor(&mut app);
+        run_command(&mut app, "%s/foo/X/g");
+        assert_eq!(app.editor().text(), "X bar\nX baz\nbar X");
+    }
+
+    #[test]
+    fn colon_subst_no_match_shows_error_toast() {
+        let (mut app, _rx) = app_with_channel();
+        app.editor_mut().set_text("foo");
+        enter_normal_in_editor(&mut app);
+        run_command(&mut app, "s/zzz/X/");
+        assert_eq!(app.editor().text(), "foo");
+        let toast = app.toast.as_ref().expect("error toast");
+        assert!(toast.is_error);
+        assert!(toast.message.contains("no match"));
+    }
+
+    #[test]
+    fn colon_tabnew_opens_a_new_tab_and_focuses_editor() {
+        let (mut app, _rx) = app_with_channel();
+        enter_normal_in_editor(&mut app);
+        run_command(&mut app, "tabnew");
+        assert_eq!(app.tabs.list.len(), 2);
+        assert_eq!(app.tabs.active, 1);
+        assert_eq!(app.focus, FocusPane::Editor);
+    }
+
+    #[test]
+    fn colon_q_quits() {
+        let (mut app, _rx) = app_with_channel();
+        enter_normal_in_editor(&mut app);
+        run_command(&mut app, "q");
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn colon_help_opens_cheatsheet() {
+        let (mut app, _rx) = app_with_channel();
+        enter_normal_in_editor(&mut app);
+        run_command(&mut app, "help");
+        assert!(app.cheatsheet_open);
+    }
+
+    #[test]
+    fn colon_w_with_no_path_opens_save_prompt() {
+        let (mut app, _rx) = app_with_channel();
+        enter_normal_in_editor(&mut app);
+        run_command(&mut app, "w");
+        assert!(app.file_prompt.is_some());
+        assert_eq!(app.file_prompt.as_ref().unwrap().mode, FilePromptMode::Save);
+    }
+
+    #[test]
+    fn colon_unknown_command_shows_error_toast() {
+        let (mut app, _rx) = app_with_channel();
+        enter_normal_in_editor(&mut app);
+        run_command(&mut app, "blargh");
+        let toast = app.toast.as_ref().expect("error toast");
+        assert!(toast.is_error);
+        assert!(toast.message.contains("blargh"));
     }
 }

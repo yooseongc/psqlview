@@ -2,12 +2,12 @@ pub mod autocomplete;
 pub mod autocomplete_context;
 pub mod cheatsheet;
 pub mod clipboard;
+pub mod command_line;
 pub mod connect_dialog;
 pub mod csv_export;
 pub mod editor;
 pub mod file_prompt;
 pub mod find;
-pub mod goto_line;
 pub mod results;
 pub mod row_detail;
 pub mod schema_tree;
@@ -151,8 +151,8 @@ fn draw_workspace(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if let Some(prompt) = &app.file_prompt {
         file_prompt::draw(frame, prompt, editor_rect);
     }
-    if let Some(state) = &app.goto_line {
-        goto_line::draw(frame, state, editor_rect);
+    if let Some(state) = &app.command_line {
+        command_line::draw(frame, state, editor_rect);
     }
     if let Some(state) = &app.find {
         find::draw(frame, state, editor_rect);
