@@ -20,6 +20,18 @@ const ROWS: &[(&str, &str)] = &[
     ("Tab / Arrows", "move between fields"),
     ("Enter (last field) / Ctrl+Enter", "submit"),
     ("", ""),
+    ("Editor modes (vim-flavored)", ""),
+    (
+        "Esc",
+        "Insert \u{2192} Normal (idle by default; type to switch back)",
+    ),
+    (
+        "i / a",
+        "Insert at / after cursor (Normal \u{2192} Insert)",
+    ),
+    ("I / A", "Insert at line start / line end"),
+    ("o / O", "open new line below / above and Insert"),
+    ("", ""),
     ("Editor", ""),
     ("F5 / Ctrl+Enter", "run query (selection or whole buffer)"),
     ("Tab", "autocomplete popup (or 2-space indent)"),

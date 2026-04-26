@@ -9,18 +9,22 @@
 pub mod bracket;
 pub mod buffer;
 pub mod edit;
+pub mod mode;
 pub mod render;
 pub mod tab;
 pub mod undo;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders};
 use ratatui::Frame;
 
 use super::focus_style;
 use buffer::{Cursor, TextBuffer};
 use edit::EditOutcome;
+use mode::Mode;
 use render::ViewState;
 use undo::UndoStack;
 
@@ -30,6 +34,7 @@ pub struct EditorState {
     buf: TextBuffer,
     undo: UndoStack,
     view: ViewState,
+    mode: Mode,
 }
 
 impl Default for EditorState {
@@ -44,7 +49,12 @@ impl EditorState {
             buf: TextBuffer::new(),
             undo: UndoStack::new(),
             view: ViewState::default(),
+            mode: Mode::default(),
         }
+    }
+
+    pub fn mode(&self) -> Mode {
+        self.mode
     }
 
     // ---- inspectors -------------------------------------------------
@@ -125,6 +135,12 @@ impl EditorState {
     /// to mark the active tab dirty without false-positives from
     /// arrow-key / scroll navigation. Undo / redo always return `true`
     /// because the buffer was replaced.
+    ///
+    /// Mode-aware: in `Mode::Normal`, mapped keys (`i a o I A O`) act
+    /// as mode-entry primitives and unmapped keys are swallowed; in
+    /// `Mode::Insert`, behavior matches the pre-modal editor, with
+    /// `Esc` flipping back to Normal. Ctrl+Z / Ctrl+Y fire in either
+    /// mode so undo isn't lost mid-vim.
     pub fn handle_key(&mut self, key: KeyEvent) -> bool {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
@@ -145,6 +161,21 @@ impl EditorState {
                 _ => {}
             }
         }
+
+        match self.mode {
+            Mode::Insert => {
+                if matches!(key.code, KeyCode::Esc) && key.modifiers.is_empty() {
+                    self.mode = Mode::Normal;
+                    self.buf.cancel_selection();
+                    return false;
+                }
+                self.handle_insert_key(key)
+            }
+            Mode::Normal => self.handle_normal_key(key),
+        }
+    }
+
+    fn handle_insert_key(&mut self, key: KeyEvent) -> bool {
         let pre = self.buf.clone();
         let outcome = edit::handle_key(&mut self.buf, key);
         if outcome == EditOutcome::Changed {
@@ -152,6 +183,91 @@ impl EditorState {
             true
         } else {
             false
+        }
+    }
+
+    /// Normal-mode dispatcher. R2 implements the six mode-entry
+    /// primitives (`i a I A o O`); motions / operators land in R3+.
+    /// Returns `true` only when text was actually inserted (`o` / `O`).
+    fn handle_normal_key(&mut self, key: KeyEvent) -> bool {
+        // Drop modifier-laden combos (Ctrl / Alt) — those are reserved
+        // for global shortcuts dispatched by App, not normal-mode
+        // commands. Plain Shift is needed for `I` / `A` / `O`.
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            return false;
+        }
+        match key.code {
+            KeyCode::Char('i') => {
+                self.mode = Mode::Insert;
+                false
+            }
+            KeyCode::Char('a') => {
+                self.buf.cancel_selection();
+                let c = self.buf.cursor();
+                let line_len = self
+                    .buf
+                    .lines()
+                    .get(c.row)
+                    .map(|l| l.chars().count())
+                    .unwrap_or(0);
+                self.buf.set_cursor(c.row, (c.col + 1).min(line_len));
+                self.mode = Mode::Insert;
+                false
+            }
+            KeyCode::Char('I') => {
+                self.buf.cancel_selection();
+                let row = self.buf.cursor().row;
+                self.buf.set_cursor(row, 0);
+                self.mode = Mode::Insert;
+                false
+            }
+            KeyCode::Char('A') => {
+                self.buf.cancel_selection();
+                let row = self.buf.cursor().row;
+                let line_len = self
+                    .buf
+                    .lines()
+                    .get(row)
+                    .map(|l| l.chars().count())
+                    .unwrap_or(0);
+                self.buf.set_cursor(row, line_len);
+                self.mode = Mode::Insert;
+                false
+            }
+            KeyCode::Char('o') => {
+                let pre = self.buf.clone();
+                self.buf.cancel_selection();
+                let row = self.buf.cursor().row;
+                let line_len = self
+                    .buf
+                    .lines()
+                    .get(row)
+                    .map(|l| l.chars().count())
+                    .unwrap_or(0);
+                self.buf.set_cursor(row, line_len);
+                self.buf.insert_newline();
+                self.undo.record(&pre);
+                self.mode = Mode::Insert;
+                true
+            }
+            KeyCode::Char('O') => {
+                let pre = self.buf.clone();
+                self.buf.cancel_selection();
+                let row = self.buf.cursor().row;
+                self.buf.set_cursor(row, 0);
+                self.buf.insert_newline();
+                // insert_newline left the cursor on row+1 (the pushed-
+                // down original line); jump back to the brand-new
+                // blank line above it.
+                self.buf.set_cursor(row, 0);
+                self.undo.record(&pre);
+                self.mode = Mode::Insert;
+                true
+            }
+            _ => false,
         }
     }
 
@@ -408,9 +524,22 @@ pub fn draw(
     hints: &render::RenderHints<'_>,
     area: Rect,
 ) {
+    let mode_style = match state.mode {
+        Mode::Insert => Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+        Mode::Normal => Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    };
+    let title = Line::from(vec![
+        Span::raw(" SQL editor "),
+        Span::styled(state.mode.label(), mode_style),
+        Span::raw("  [F5 run \u{00b7} Tab complete] "),
+    ]);
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" SQL editor  [F5 run \u{00b7} Tab complete] ")
+        .title(title)
         .border_style(focus_style(focused));
     let placeholder = if state.buf.is_empty() {
         Some(PLACEHOLDER)
@@ -638,5 +767,138 @@ mod tests {
         e.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
         e.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
         assert_eq!(e.text(), "ab");
+    }
+
+    // ---- mode state machine (R2) -----------------------------------
+
+    fn press(e: &mut EditorState, code: KeyCode, mods: KeyModifiers) -> bool {
+        e.handle_key(KeyEvent::new(code, mods))
+    }
+
+    #[test]
+    fn fresh_editor_starts_in_insert_mode() {
+        let e = EditorState::new();
+        assert_eq!(e.mode(), Mode::Insert);
+    }
+
+    #[test]
+    fn esc_in_insert_switches_to_normal() {
+        let mut e = EditorState::new();
+        e.type_text("hi");
+        let dirty = press(&mut e, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(e.mode(), Mode::Normal);
+        assert!(!dirty, "mode flip is not a text change");
+        assert_eq!(e.text(), "hi", "Esc must not mutate the buffer");
+    }
+
+    #[test]
+    fn normal_swallows_unmapped_keys() {
+        let mut e = EditorState::new();
+        e.type_text("abc");
+        press(&mut e, KeyCode::Esc, KeyModifiers::NONE);
+        // 'x' is unmapped in R2 — buffer must not change.
+        let before = e.text();
+        let dirty = press(&mut e, KeyCode::Char('x'), KeyModifiers::NONE);
+        assert!(!dirty);
+        assert_eq!(e.text(), before);
+        assert_eq!(e.mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn i_in_normal_switches_to_insert_at_cursor() {
+        let mut e = EditorState::new();
+        e.type_text("ab");
+        press(&mut e, KeyCode::Esc, KeyModifiers::NONE);
+        // Cursor is at (0, 2) (end of "ab").
+        press(&mut e, KeyCode::Char('i'), KeyModifiers::NONE);
+        assert_eq!(e.mode(), Mode::Insert);
+        assert_eq!(e.cursor_pos(), (0, 2));
+    }
+
+    #[test]
+    fn a_in_normal_moves_right_then_insert() {
+        let mut e = EditorState::new();
+        e.type_text("ab");
+        // Move cursor to col 1 ('b' is at col 1).
+        press(&mut e, KeyCode::Left, KeyModifiers::NONE);
+        press(&mut e, KeyCode::Esc, KeyModifiers::NONE);
+        press(&mut e, KeyCode::Char('a'), KeyModifiers::NONE);
+        assert_eq!(e.mode(), Mode::Insert);
+        assert_eq!(e.cursor_pos(), (0, 2));
+    }
+
+    #[test]
+    fn a_at_eol_does_not_move_past_end() {
+        let mut e = EditorState::new();
+        e.type_text("ab"); // cursor at (0, 2) — end of line
+        press(&mut e, KeyCode::Esc, KeyModifiers::NONE);
+        press(&mut e, KeyCode::Char('a'), KeyModifiers::NONE);
+        assert_eq!(e.cursor_pos(), (0, 2));
+    }
+
+    #[test]
+    fn capital_i_jumps_to_line_start() {
+        let mut e = EditorState::new();
+        e.type_text("abc"); // cursor (0, 3)
+        press(&mut e, KeyCode::Esc, KeyModifiers::NONE);
+        press(&mut e, KeyCode::Char('I'), KeyModifiers::SHIFT);
+        assert_eq!(e.mode(), Mode::Insert);
+        assert_eq!(e.cursor_pos(), (0, 0));
+    }
+
+    #[test]
+    fn capital_a_jumps_to_line_end() {
+        let mut e = EditorState::new();
+        e.type_text("abc");
+        press(&mut e, KeyCode::Home, KeyModifiers::NONE); // (0, 0)
+        press(&mut e, KeyCode::Esc, KeyModifiers::NONE);
+        press(&mut e, KeyCode::Char('A'), KeyModifiers::SHIFT);
+        assert_eq!(e.mode(), Mode::Insert);
+        assert_eq!(e.cursor_pos(), (0, 3));
+    }
+
+    #[test]
+    fn o_opens_line_below_and_enters_insert() {
+        let mut e = EditorState::new();
+        e.type_text("abc");
+        press(&mut e, KeyCode::Esc, KeyModifiers::NONE);
+        let dirty = press(&mut e, KeyCode::Char('o'), KeyModifiers::NONE);
+        assert!(dirty, "o adds text");
+        assert_eq!(e.mode(), Mode::Insert);
+        assert_eq!(e.text(), "abc\n");
+        assert_eq!(e.cursor_pos(), (1, 0));
+    }
+
+    #[test]
+    fn capital_o_opens_line_above_and_enters_insert() {
+        let mut e = EditorState::new();
+        e.type_text("abc");
+        press(&mut e, KeyCode::Esc, KeyModifiers::NONE);
+        let dirty = press(&mut e, KeyCode::Char('O'), KeyModifiers::SHIFT);
+        assert!(dirty, "O adds text");
+        assert_eq!(e.mode(), Mode::Insert);
+        assert_eq!(e.text(), "\nabc");
+        assert_eq!(e.cursor_pos(), (0, 0));
+    }
+
+    #[test]
+    fn ctrl_z_works_in_normal_mode() {
+        let mut e = EditorState::new();
+        e.type_text("ab");
+        press(&mut e, KeyCode::Esc, KeyModifiers::NONE);
+        press(&mut e, KeyCode::Char('z'), KeyModifiers::CONTROL);
+        assert_eq!(e.text(), "a");
+    }
+
+    #[test]
+    fn entering_insert_from_normal_then_typing_inserts_text() {
+        let mut e = EditorState::new();
+        e.type_text("ab");
+        press(&mut e, KeyCode::Esc, KeyModifiers::NONE);
+        press(&mut e, KeyCode::Char('A'), KeyModifiers::SHIFT);
+        // Now in Insert at (0, 2). Type a single char.
+        let dirty = press(&mut e, KeyCode::Char('c'), KeyModifiers::NONE);
+        assert!(dirty);
+        assert_eq!(e.text(), "abc");
     }
 }
