@@ -26,6 +26,7 @@ const ROWS: &[(&str, &str)] = &[
     ("Shift+Tab", "outdent current line"),
     ("Ctrl+Up / Ctrl+Down", "recall previous / next query"),
     ("Ctrl+O / Ctrl+S", "open / save file (cwd-relative path)"),
+    ("Ctrl+G", "goto line (1-based, clamped)"),
     ("Ctrl+Shift+V (terminal)", "paste (bracketed)"),
     ("", ""),
     ("Editor tabs", ""),

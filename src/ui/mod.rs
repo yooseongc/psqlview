@@ -6,6 +6,7 @@ pub mod connect_dialog;
 pub mod csv_export;
 pub mod editor;
 pub mod file_prompt;
+pub mod goto_line;
 pub mod results;
 pub mod row_detail;
 pub mod schema_tree;
@@ -127,6 +128,9 @@ fn draw_workspace(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
     if let Some(prompt) = &app.file_prompt {
         file_prompt::draw(frame, prompt, editor_rect);
+    }
+    if let Some(state) = &app.goto_line {
+        goto_line::draw(frame, state, editor_rect);
     }
 
     status::draw(frame, app, status_area);

@@ -17,6 +17,7 @@ use crate::ui::csv_export;
 use crate::ui::editor::tab::TabSlot;
 use crate::ui::editor::EditorState;
 use crate::ui::file_prompt::{self, FilePromptMode, FilePromptState};
+use crate::ui::goto_line::{self, GotoLineOutcome, GotoLineState};
 use crate::ui::results::ResultsState;
 use crate::ui::row_detail::RowDetailState;
 use crate::ui::schema_tree::SchemaTreeState;
@@ -168,6 +169,11 @@ pub struct App {
     /// prompt is modal at the application level — every key routes to it.
     pub file_prompt: Option<FilePromptState>,
 
+    /// `Ctrl+G` inline goto-line prompt. Slotted between `file_prompt`
+    /// and `find` in the modal precedence chain. Only digits / Enter /
+    /// Backspace / Esc reach it.
+    pub goto_line: Option<GotoLineState>,
+
     /// Two-strike confirm for closing a dirty tab. First `Ctrl+W` on a
     /// dirty tab records `(tab_idx, when)` and shows a toast; a second
     /// `Ctrl+W` on the same tab within 3 seconds discards. Any other
@@ -218,6 +224,7 @@ impl App {
             row_detail: RowDetailState::default(),
             cheatsheet_open: false,
             file_prompt: None,
+            goto_line: None,
             pending_tab_close: None,
             last_run_sql: None,
             last_ddl_target: None,
@@ -437,6 +444,13 @@ impl App {
             return;
         }
 
+        // Goto-line is the next-priority modal — the prompt sits over
+        // the editor pane and absorbs every key until Enter / Esc.
+        if self.goto_line.is_some() {
+            self.handle_goto_line_key(key);
+            return;
+        }
+
         // Modal overlays capture keys before any pane does.
         if self.cheatsheet_open {
             match key.code {
@@ -641,6 +655,11 @@ impl App {
                 }
                 KeyCode::Char('s') | KeyCode::Char('S') => {
                     self.open_file_prompt(FilePromptMode::Save);
+                    return;
+                }
+                KeyCode::Char('g') | KeyCode::Char('G') => {
+                    self.goto_line = Some(GotoLineState::new());
+                    self.autocomplete = None;
                     return;
                 }
                 _ => {}
@@ -883,6 +902,25 @@ impl App {
                 state.push_char(c);
             }
             _ => {}
+        }
+    }
+
+    /// Routes a keystroke into the goto-line overlay. On `Submit(n)`
+    /// the active editor's caret jumps; on `Cancel` the overlay closes
+    /// without touching the buffer; on `Stay` the input stays open.
+    fn handle_goto_line_key(&mut self, key: KeyEvent) {
+        let Some(state) = self.goto_line.as_mut() else {
+            return;
+        };
+        match goto_line::handle_key(state, key) {
+            GotoLineOutcome::Stay => {}
+            GotoLineOutcome::Cancel => {
+                self.goto_line = None;
+            }
+            GotoLineOutcome::Submit(n) => {
+                self.goto_line = None;
+                self.editor_mut().goto_line(n);
+            }
         }
     }
 
@@ -1862,6 +1900,74 @@ mod tests {
             KeyModifiers::CONTROL,
         )));
         assert_eq!(app.active_tab, 2);
+    }
+
+    #[test]
+    fn ctrl_g_opens_goto_line_overlay() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        app.on_event(AppEvent::Key(key(
+            KeyCode::Char('g'),
+            KeyModifiers::CONTROL,
+        )));
+        assert!(app.goto_line.is_some());
+        assert_eq!(app.goto_line.as_ref().unwrap().input(), "");
+    }
+
+    #[test]
+    fn goto_line_jumps_active_editor_on_enter() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        app.editor_mut().set_text("a\nb\nc\nd");
+        app.on_event(AppEvent::Key(key(
+            KeyCode::Char('g'),
+            KeyModifiers::CONTROL,
+        )));
+        for c in "3".chars() {
+            app.on_event(AppEvent::Key(key(KeyCode::Char(c), KeyModifiers::NONE)));
+        }
+        app.on_event(AppEvent::Key(key(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.goto_line.is_none());
+        assert_eq!(app.editor().cursor_line_col(), (3, 1));
+    }
+
+    #[test]
+    fn goto_line_esc_closes_without_jumping() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        app.editor_mut().set_text("a\nb\nc");
+        // Cursor starts at end-of-buffer after set_text. Capture for assertion.
+        let before = app.editor().cursor_line_col();
+        app.on_event(AppEvent::Key(key(
+            KeyCode::Char('g'),
+            KeyModifiers::CONTROL,
+        )));
+        for c in "2".chars() {
+            app.on_event(AppEvent::Key(key(KeyCode::Char(c), KeyModifiers::NONE)));
+        }
+        app.on_event(AppEvent::Key(key(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(app.goto_line.is_none());
+        assert_eq!(app.editor().cursor_line_col(), before);
+    }
+
+    #[test]
+    fn goto_line_swallows_non_digit_keys() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        app.on_event(AppEvent::Key(key(
+            KeyCode::Char('g'),
+            KeyModifiers::CONTROL,
+        )));
+        // Letters / F-keys / Esc-equivalents don't dismiss; only Esc / Enter do.
+        app.on_event(AppEvent::Key(key(KeyCode::F(2), KeyModifiers::NONE)));
+        assert!(app.goto_line.is_some());
+        // Letter is ignored; input stays empty.
+        app.on_event(AppEvent::Key(key(KeyCode::Char('q'), KeyModifiers::NONE)));
+        assert_eq!(app.goto_line.as_ref().unwrap().input(), "");
     }
 
     #[test]

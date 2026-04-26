@@ -214,6 +214,20 @@ impl EditorState {
         self.view.scroll_top = new as usize;
     }
 
+    /// Moves the cursor to a 1-based line number, clamped into the
+    /// buffer's range. Used by the `Ctrl+G` overlay; selection is
+    /// cleared so the goto-line jump doesn't accidentally extend a
+    /// selection the user had active.
+    pub fn goto_line(&mut self, line_1based: usize) {
+        let total = self.buf.line_count();
+        if total == 0 {
+            return;
+        }
+        let target_row = line_1based.saturating_sub(1).min(total - 1);
+        self.buf.cancel_selection();
+        self.buf.set_cursor(target_row, 0);
+    }
+
     /// Moves the cursor to the 1-based character position used by Postgres
     /// error reports. Returns `true` if the position fell inside the
     /// buffer, `false` if it was past the end.
@@ -477,6 +491,30 @@ mod tests {
         let mut e = EditorState::new();
         e.insert_str("a\r\nb");
         assert_eq!(e.text(), "a\nb");
+    }
+
+    #[test]
+    fn goto_line_jumps_to_first_column_of_target_row() {
+        let mut e = EditorState::new();
+        e.type_text("a\nb\nc\nd");
+        e.goto_line(3);
+        assert_eq!(e.cursor_line_col(), (3, 1));
+    }
+
+    #[test]
+    fn goto_line_clamps_to_last_row_when_out_of_range() {
+        let mut e = EditorState::new();
+        e.type_text("a\nb\nc");
+        e.goto_line(99);
+        assert_eq!(e.cursor_line_col(), (3, 1));
+    }
+
+    #[test]
+    fn goto_line_zero_is_treated_as_line_one() {
+        let mut e = EditorState::new();
+        e.type_text("a\nb\nc");
+        e.goto_line(0);
+        assert_eq!(e.cursor_line_col(), (1, 1));
     }
 
     #[test]
