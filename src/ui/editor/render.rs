@@ -33,6 +33,18 @@ pub struct RenderHints<'a> {
     pub active_match: Option<usize>,
 }
 
+/// Bundle of the layout / chrome / overlay parameters fed into
+/// `draw`. `frame`, `buf`, and `view` stay as positional args because
+/// each carries a distinct borrow shape (one mut, one shared, one mut)
+/// that doesn't compose into a struct without extra lifetime gymnastics.
+pub struct DrawArgs<'a> {
+    pub area: Rect,
+    pub focused: bool,
+    pub block: Block<'a>,
+    pub placeholder: Option<&'a str>,
+    pub hints: &'a RenderHints<'a>,
+}
+
 impl ViewState {
     /// Adjusts `scroll_top` so the cursor is visible inside `inner_height`.
     /// Called from the draw pass before laying out lines.
@@ -48,21 +60,14 @@ impl ViewState {
     }
 }
 
-// `RenderHints` already bundles the overlay-config args; the rest are
-// frame / buffer / view / block / placeholder / focused / area —
-// each a distinct concern. The R6 refactor pass will revisit a wider
-// `DrawCtx` if more parameters need to ride along.
-#[allow(clippy::too_many_arguments)]
-pub fn draw(
-    frame: &mut Frame<'_>,
-    buf: &TextBuffer,
-    view: &mut ViewState,
-    block: Block<'_>,
-    placeholder: Option<&str>,
-    focused: bool,
-    find_hints: &RenderHints<'_>,
-    area: Rect,
-) {
+pub fn draw(frame: &mut Frame<'_>, buf: &TextBuffer, view: &mut ViewState, args: DrawArgs<'_>) {
+    let DrawArgs {
+        area,
+        focused,
+        block,
+        placeholder,
+        hints: find_hints,
+    } = args;
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {

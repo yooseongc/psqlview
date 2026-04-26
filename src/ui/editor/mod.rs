@@ -421,11 +421,13 @@ pub fn draw(
         frame,
         &state.buf,
         &mut state.view,
-        block,
-        placeholder,
-        focused,
-        hints,
-        area,
+        render::DrawArgs {
+            area,
+            focused,
+            block,
+            placeholder,
+            hints,
+        },
     );
 }
 
