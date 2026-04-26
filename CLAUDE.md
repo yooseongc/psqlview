@@ -108,7 +108,14 @@ back to the focused pane if coordinates don't hit any rect. Paste
 events are accepted only when the Editor has focus on the Workspace
 screen and are inserted via `EditorState::insert_str` (CRLF → LF).
 
-### State machine (src/app.rs)
+### State machine (src/app/)
+
+`App` is split across `src/app/{mod, keys, query, file_io, autocomplete,
+clipboard, history, toasts}.rs` — each `impl App` block lives next to
+the state it touches. `mod.rs` owns the struct + lifecycle (`new`,
+`on_event`, `on_tick`, `on_mouse`, `on_paste`, tab plumbing,
+`begin_connect`, `on_connect_result`); `keys.rs` owns the full modal-
+key cascade.
 
 ```
 Screen::Connect  ──submit──▶  connecting=true  ──ConnectResult(ok)──▶  Screen::Workspace
@@ -170,13 +177,34 @@ top-level `App` never touches the ratatui widgets directly.
   EXPLAIN-shaped results (single column named `QUERY PLAN`) are
   detected at `set_result` time and rendered by `draw_explain` with
   per-line node-name + cost/timing styling.
-- `tui-textarea` owns its own undo stack and cursor; the editor module
-  is a thin wrapper. Light SQL keyword highlighting is provided by
-  feeding a single regex into tui-textarea's `search_pattern` (the
-  `search` cargo feature). Cursor jumps for error POSITIONs use
-  `move_cursor_to_char_position`. Block indent / outdent on a
-  selection is handled via `selected_line_range` + `indent_lines` /
-  `outdent_lines`.
+- `editor/` is a self-contained modal SQL editor (no `tui-textarea`).
+  `EditorState` owns `TextBuffer` + `UndoStack` + `ViewState` +
+  `Mode` + pending-state slots (`pending_count`, `pending_chord`,
+  `pending_op`, `pending_obj_scope`, `register`). Mode-aware key
+  dispatch lives in `handle_key` → `handle_insert_key` /
+  `handle_normal_key` / `handle_op_pending_key` / `handle_visual_key`.
+  Helpers `take_count` / `take_gg_target_row` /
+  `take_capital_g_target_row` / `matches_chord_resolution` collapse
+  what would otherwise be triplicated chord/digit/G handling. Cursor
+  jumps for error POSITIONs use `move_cursor_to_char_position`.
+  Block indent / outdent uses `selected_line_range` +
+  `indent_lines` / `outdent_lines`. Multi-buffer support is in
+  `tab.rs` (`TabSlot` per buffer + `Tabs` container with two-strike
+  dirty-close).
+- `motion.rs` is a pure-function module — `apply(buf, motion, count)
+  → Cursor`. Word semantics use a 3-class partition (whitespace /
+  identifier / punct), with newlines counting as whitespace.
+- `text_object.rs` provides `iw aw iW aW i" a" i' a' i( a(`. WORD
+  (`iW`/`aW`) is whitespace-bounded so SQL dotted identifiers like
+  `schema.table` travel together.
+- `find.rs::FindState` powers both Ctrl+F (`enter_closes = false`)
+  and vim `/?` (`enter_closes = true` + `anchor` so each typed char
+  moves the active match relative to the cursor).
+- `command_line.rs` is the `:` ex prompt — single-line, parser-
+  separated-from-execution. Parser returns `Command` enum;
+  `App::execute_command` dispatches into existing primitives
+  (`EditorState::goto_line`, `replace_all`, `commit_open`,
+  `commit_save`, tab management, `should_quit`).
 - `autocomplete.rs` holds `AutocompletePopup` — a prefix-filtered
   candidate list overlaid on the editor. Opened by Tab when a word
   prefix sits at the cursor. The popup is owned by `App`, not by the
@@ -195,8 +223,10 @@ top-level `App` never touches the ratatui widgets directly.
 - `row_detail.rs` is a centered overlay that lists every column of
   the currently-selected result row. Opened by Enter on a populated
   Results pane; absorbs its own Esc/Enter/arrow keys.
-- `cheatsheet.rs` is a static-table overlay listing every keybinding,
+- `cheatsheet.rs` is a scrollable overlay listing every keybinding,
   opened by `F1` or `?` outside the editor / search / autocomplete.
+  Reuses `Paragraph::scroll` + `clamp_scroll` so it behaves the same
+  way as `row_detail`.
 - `file_prompt.rs` is the `Ctrl+O` / `Ctrl+S` inline filename prompt.
   Owned by `App::file_prompt`; rendered as a 3-row overlay pinned to
   the bottom of the editor area. While `Some`, it is the highest-
@@ -208,31 +238,53 @@ top-level `App` never touches the ratatui widgets directly.
   synchronous (small SQL files); errors surface as toasts and leave
   the editor buffer unchanged.
 
-Modal layering (highest priority first):
-1. `cheatsheet_open` — swallows all keys until closed.
-2. `row_detail.open` — same.
-3. Tree incremental search (`tree.search.is_some()` while focused).
-4. Autocomplete popup (while editor focused).
-5. Running query (Esc → cancel only).
-6. Pane-specific handler.
+Modal layering (highest priority first, all checked in
+`App::on_key`):
+1. Quit (`Ctrl+Q` / `Ctrl+C`) — always wins.
+2. `file_prompt` — Ctrl+O / Ctrl+S / Ctrl+E inline prompt; absorbs
+   every key (even F-keys) until Enter / Esc.
+3. `command_line` — `:` ex prompt. Single-line, absorbs every key.
+4. `cheatsheet.open` — `F1` / `?` overlay; routes Up/Down/PageUp/
+   PageDown into scroll position and Esc/Enter/?/q to close.
+5. `row_detail.open` — full-row modal (Enter on Results).
+6. `find.is_some()` — Ctrl+F / Ctrl+H / vim `/?` overlay.
+7. Autocomplete popup (while editor focused).
+8. Tree incremental search (`tree.search.is_some()` while focused).
+9. Running query (Esc → cancel only).
+10. Pane-specific handler. Inside the editor pane the dispatcher
+    branches further on `editor.mode()`.
 
-Keybinding quick-ref (workspace):
+Keybinding quick-ref (workspace). The full list lives in
+`src/ui/cheatsheet.rs::ROWS` and is rendered scrollably by `F1`/`?`.
+
 - `F5` / `Ctrl+Enter` run (selection if active, else whole buffer)
-- `Esc` dismiss toast → cancel query → cancel connect (cascading)
+- `Esc` dismiss toast → cancel query → cancel connect (cascading);
+  inside the editor it also flips Insert→Normal
 - `F2`/`F3`/`F4` focus tree/editor/results (also `Alt+1/2/3` backup)
-- `F1` or `?` open cheatsheet
-- Editor: `Tab` autocomplete/indent · `Shift+Tab` outdent (block-aware)
-  · `Ctrl+Up/Down` recall query history · `Ctrl+O`/`Ctrl+S` open/save
-  file (cwd-relative path) · `Ctrl+G` goto line · `Ctrl+F` find ·
-  `Ctrl+H` find/replace
-- Editor tabs: `Ctrl+T` new · `Ctrl+W` close (twice within 3s if dirty)
-  · `Ctrl+]` / `Ctrl+[` (or `Ctrl+PageDown`/`Up`) cycle ·
+- `F1` or `?` open cheatsheet (scrollable: `j`/`k` / arrows /
+  PageUp/Down / Home/End)
+- Editor (Insert): `Tab` autocomplete/indent · `Shift+Tab` outdent
+  (block-aware) · `Ctrl+Up/Down` history · `Ctrl+O`/`Ctrl+S`
+  open/save · `Ctrl+F` find · `Ctrl+H` find/replace ·
+  `Ctrl+G` opens the `:` command line as a goto-line alias
+- Editor (Normal): `i a I A o O` enter Insert · `v` enter Visual ·
+  motions `h j k l w b e 0 ^ $ gg G %` (count prefix) ·
+  operators `d y c x s` + `dd yy cc` linewise · text objects
+  `iw aw iW aW i" a" i' a' i( a(` · `p`/`P` paste ·
+  `/`/`?`/`n`/`N` search · `:` open command line
+- Editor tabs (any mode): `Ctrl+T` new · `Ctrl+W` close (twice within
+  3s if dirty) · `Ctrl+]`/`Ctrl+[` (or `Ctrl+PageDown`/`Up`) cycle ·
   `Ctrl+1..9` jump to tab N
-- Tree: `/` incremental search · `n`/`N` repeat · `p` / `Space` preview
-  rows of selected table · `D` show synthesized DDL
-- Results: `Enter` row detail · `s` sort current column (Asc→Desc→off)
-  · `Ctrl+Left`/`Ctrl+Right` first/last column · `y` / `Y` copy cell /
-  row (OSC 52 clipboard) · `R` re-run last query
+- `:` command line: `:N` goto line · `:s/pat/repl/[g]` /
+  `:%s/pat/repl/[g]` substitute · `:w [path]` save · `:e <path>`
+  open · `:tabnew` / `:tabn` / `:tabp` / `:tabc` · `:q` quit ·
+  `:help` open cheatsheet
+- Tree: `/` incremental search · `n`/`N` repeat · `p` / `Space`
+  preview rows of selected table · `D` show synthesized DDL
+- Results: `Enter` row detail · `s` sort current column
+  (Asc→Desc→off) · `Ctrl+Left`/`Ctrl+Right` first/last column ·
+  `y` / `Y` copy cell / row (OSC 52 clipboard) · `R` re-run last
+  query
 - Workspace-wide: `Ctrl+E` export current result set to CSV
 - `Ctrl+Q` / `Ctrl+C` quit. `F10` is NOT bound.
 

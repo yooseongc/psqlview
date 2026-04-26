@@ -1,15 +1,17 @@
 # psqlview
 
-A small, fast TUI for browsing PostgreSQL 14+ databases and running ad-hoc
-SQL. Ships as a single statically-linked musl binary for Linux x86_64.
+A small, fast TUI for browsing PostgreSQL 14+ databases and running
+ad-hoc SQL. Ships as a single statically-linked musl binary for Linux
+x86_64.
 
 - **Drivers**: `tokio-postgres` with `rustls` TLS (no OpenSSL).
 - **UI**: `ratatui` + `crossterm`, with a custom in-tree SQL editor
-  (no `tui-textarea`) so syntax highlighting can run per-token.
+  that supports per-token syntax highlighting, multi-buffer tabs, and
+  vim-flavored modal editing.
 - **Runtime**: Tokio multi-threaded runtime, background workers dispatch
   events back to the draw loop through an `mpsc` channel.
-- **Compatibility**: PostgreSQL 14, 15, 16, 17 (anything newer should also
-  work — catalog queries avoid version-specific columns).
+- **Compatibility**: PostgreSQL 14, 15, 16, 17 (anything newer should
+  also work — catalog queries avoid version-specific columns).
 
 ## Features
 
@@ -41,6 +43,27 @@ SQL. Ships as a single statically-linked musl binary for Linux x86_64.
 - **Bracket-pair matching**: brackets at the cursor and their match
   are highlighted in reverse video; brackets inside strings or
   comments are skipped.
+- **Multi-buffer tabs** (`Ctrl+T` new, `Ctrl+W` close, `Ctrl+]` /
+  `Ctrl+[` cycle, `Ctrl+1`..`Ctrl+9` jump). Dirty tabs require a
+  two-strike `Ctrl+W` within 3 s to close. Each tab keeps its own
+  cursor, undo stack, file path, and last-search needle.
+- **Vim-flavored modal editing** — Insert (default) / Normal /
+  Visual modes. `Esc` flips to Normal; `i a I A o O` flip back to
+  Insert; `v` enters Visual.
+  - Motions: `h j k l w b e 0 ^ $ gg G %` with count prefix
+    (`5w`, `3dd`, etc.). `iW`/`aW` (big-WORD) catches dotted SQL
+    identifiers like `schema.table` as one unit.
+  - Operators: `d y c x s` plus `dd yy cc` linewise; text objects
+    `iw aw iW aW i" a" i' a' i( a(`. Single unnamed register;
+    `p` / `P` paste.
+  - Search: `/pat<Enter>` / `?pat<Enter>` (forward / backward),
+    `n` / `N` repeat in same / reverse direction.
+  - `:` command line — `:N` goto line, `:s/pat/repl/[g]` and
+    `:%s/...` substitute, `:w [path]` save, `:e <path>` open,
+    `:tabnew/n/p/c`, `:q`, `:help`.
+- **Non-modal fallbacks** for users who never touch Normal: `Ctrl+G`
+  goto line (opens `:` prefilled), `Ctrl+F` incremental find,
+  `Ctrl+H` find / replace.
 - **Context-aware autocomplete** (`Tab`):
   - After `FROM` / `JOIN` / `INTO` / `UPDATE` / `TABLE` → relation names.
   - After `qualifier.` → columns of `qualifier`, with alias resolution
@@ -49,7 +72,8 @@ SQL. Ships as a single statically-linked musl binary for Linux x86_64.
 - **Block indent / outdent** for multi-line selections.
 - **Run-selection**: `F5` / `Ctrl+Enter` execute the highlighted text
   when a selection is active, otherwise the whole buffer.
-- **Query history** (`Ctrl+Up` / `Ctrl+Down`) — memory-only, 50 entries.
+- **Query history** (`Ctrl+Up` / `Ctrl+Down`) — memory-only, 50 entries,
+  shared across all tabs in a session.
 - **File open / save**: `Ctrl+O` and `Ctrl+S` open an inline filename
   prompt anchored to the bottom of the editor pane. Paths are
   cwd-relative; absolute paths pass through; CRLF is normalized to LF
@@ -89,6 +113,9 @@ SQL. Ships as a single statically-linked musl binary for Linux x86_64.
 
 ## Keybindings
 
+The full reference lives inside the app — press `F1` (or `?` outside the
+editor) to open a scrollable cheatsheet. Highlights:
+
 | Scope | Key | Action |
 | --- | --- | --- |
 | Global | `F1` / `?` | Show keybinding cheatsheet |
@@ -98,13 +125,26 @@ SQL. Ships as a single statically-linked musl binary for Linux x86_64.
 | Global | `Tab` / `Shift+Tab` | Cycle focus (outside editor) |
 | Global | `Esc` | Dismiss toast → cancel query → cancel connect |
 | Global | `Ctrl+E` | Export current result set to CSV |
-| Editor | `F5` / `Ctrl+Enter` | Run query (selection or whole buffer) |
-| Editor | `Tab` | Context-aware autocomplete or 2-space indent |
-| Editor | `Shift+Tab` | Outdent (block-aware on selection) |
-| Editor | `Ctrl+Z` / `Ctrl+Y` | Undo / redo |
-| Editor | `Ctrl+Up` / `Ctrl+Down` | Recall previous / next query |
-| Editor | `Ctrl+O` / `Ctrl+S` | Open / save file (cwd-relative path) |
-| Editor | `Ctrl+Shift+V` (terminal) | Bracketed paste |
+| Editor (any mode) | `F5` / `Ctrl+Enter` | Run query (selection or whole buffer) |
+| Editor (any mode) | `Ctrl+Z` / `Ctrl+Y` | Undo / redo |
+| Editor (any mode) | `Ctrl+Up` / `Ctrl+Down` | Recall previous / next query |
+| Editor (any mode) | `Ctrl+O` / `Ctrl+S` | Open / save file (cwd-relative path) |
+| Editor (any mode) | `Ctrl+T` / `Ctrl+W` | New tab / close tab (twice in 3 s if dirty) |
+| Editor (any mode) | `Ctrl+]` / `Ctrl+[` | Next / previous tab |
+| Editor (any mode) | `Ctrl+1` .. `Ctrl+9` | Jump to tab N |
+| Editor (Insert) | `Tab` | Context-aware autocomplete or 2-space indent |
+| Editor (Insert) | `Shift+Tab` | Outdent (block-aware on selection) |
+| Editor (Insert) | `Ctrl+Shift+V` (terminal) | Bracketed paste |
+| Editor (Insert) | `Esc` | Insert → Normal mode |
+| Editor (Normal) | `i  a  I  A  o  O` | Enter Insert (positioned per vim) |
+| Editor (Normal) | `v` | Enter Visual |
+| Editor (Normal) | `h j k l  w b e  0 ^ $  gg G  %` | Vim motions (count prefix supported) |
+| Editor (Normal) | `d y c  dd yy cc  x  p P` | Operators + paste |
+| Editor (Normal) | `iw aw  iW aW  i" a"  i( a(` | Text objects |
+| Editor (Normal) | `/pat<Enter>` / `?pat<Enter>` | Forward / backward search |
+| Editor (Normal) | `n` / `N` | Repeat last search (same / reverse direction) |
+| Editor (Normal) | `:` (or `Ctrl+G`) | Open `:` command line |
+| Editor (Insert fallback) | `Ctrl+F` / `Ctrl+H` | Incremental find / find-and-replace |
 | Schema tree | `j k` / arrows | Move |
 | Schema tree | `PageUp` / `PageDown` | Page (screenful) |
 | Schema tree | `Home` / `End` | First / last entry |
@@ -220,7 +260,15 @@ src/
   main.rs             terminal setup/teardown, tokio runtime,
                       bracketed-paste + mouse capture wiring
   lib.rs              re-exports modules so tests can depend on them
-  app.rs              state machine + event dispatch
+  app/                state machine + event dispatch (split by concern)
+    mod.rs              App struct, Screen/FocusPane/QueryStatus, lifecycle
+    keys.rs             modal-key cascade, vim search, : command line dispatch
+    query.rs            dispatch_sql, run/cancel/rerun, ddl_to_resultset
+    file_io.rs          Ctrl+O / Ctrl+S / Ctrl+E commit (open / save / export)
+    autocomplete.rs     Tab handler, context-narrowed candidate pool
+    clipboard.rs        OSC 52 cell / row copy
+    history.rs          in-session query history (Ctrl+Up / Ctrl+Down)
+    toasts.rs           toast_info / toast_error
   event.rs            crossterm → AppEvent pump (+ tick timer)
   config.rs           ConnInfo (zeroized password)
   types.rs            CellValue, ColumnMeta, ResultSet, ServerVersion, SslMode
@@ -236,17 +284,23 @@ src/
     schema_tree.rs            lazy tree, flatten(), `/` search, paging
     sql_lexer.rs              per-token lexer feeding editor + bracket-pair
     editor/
-      mod.rs                  EditorState, public surface
-      buffer.rs               TextBuffer + cursor + selection
-      edit.rs                 key → buffer mutation
+      mod.rs                  EditorState, public surface, modal dispatch
+      buffer.rs               TextBuffer + cursor + selection + delete_range
+      edit.rs                 key → buffer mutation (Insert mode body)
+      mode.rs                 Mode::{Insert, Normal, Visual}
+      motion.rs               vim motions (h j k l w b e 0 ^ $ %) — pure functions
+      text_object.rs          iw aw iW aW i" a" i' a' i( a(
+      tab.rs                  TabSlot + Tabs container (multi-buffer)
       undo.rs                 bounded undo / redo stack
       bracket.rs              bracket-pair finder
-      render.rs               syntax-coloured render + caret + match
+      render.rs               syntax-coloured render + caret + RenderHints
     autocomplete.rs           prefix-filtered candidate popup
     autocomplete_context.rs   classifies cursor (TableName / Dotted / Default)
+    command_line.rs           `:` ex-command prompt + parser
+    find.rs                   incremental find / replace + vim-search semantics
     results.rs                paginated table, column sizing, sort, EXPLAIN
     row_detail.rs             full-row modal (Enter on Results)
-    cheatsheet.rs             keybinding overlay (F1 / ?)
+    cheatsheet.rs             scrollable keybinding overlay (F1 / ?)
     file_prompt.rs            inline filename prompt (Ctrl+O / Ctrl+S / Ctrl+E)
     csv_export.rs             RFC 4180 CSV serializer
     clipboard.rs              OSC 52 escape + hand-rolled base64
