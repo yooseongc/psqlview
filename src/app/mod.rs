@@ -1613,4 +1613,147 @@ mod tests {
         assert!(cands.contains(&"id".to_string()));
         assert!(cands.iter().any(|s| s == "IN" || s == "INTO" || s == "IS"));
     }
+
+    // ---- vim-style search (R5) -------------------------------------
+
+    #[test]
+    fn slash_in_normal_mode_opens_vim_search_overlay() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        app.editor_mut().set_text("foo bar foo");
+        app.on_event(AppEvent::Key(key(KeyCode::Esc, KeyModifiers::NONE)));
+        app.on_event(AppEvent::Key(key(KeyCode::Char('/'), KeyModifiers::NONE)));
+        let f = app.find.as_ref().expect("find open");
+        assert!(!f.backward);
+        assert!(f.enter_closes);
+    }
+
+    #[test]
+    fn slash_in_insert_mode_inserts_literal_slash() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        // Default mode is Insert.
+        app.on_event(AppEvent::Key(key(KeyCode::Char('/'), KeyModifiers::NONE)));
+        assert_eq!(app.editor().text(), "/");
+        assert!(app.find.is_none());
+    }
+
+    #[test]
+    fn vim_forward_search_jumps_and_closes_on_enter() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        app.editor_mut().set_text("zzz hello world hello");
+        app.on_event(AppEvent::Key(key(KeyCode::Home, KeyModifiers::NONE)));
+        app.on_event(AppEvent::Key(key(KeyCode::Esc, KeyModifiers::NONE)));
+        // / hello <Enter>
+        app.on_event(AppEvent::Key(key(KeyCode::Char('/'), KeyModifiers::NONE)));
+        for c in "hello".chars() {
+            app.on_event(AppEvent::Key(key(KeyCode::Char(c), KeyModifiers::NONE)));
+        }
+        app.on_event(AppEvent::Key(key(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.find.is_none(), "overlay closes on Enter");
+        assert_eq!(app.editor().cursor_pos(), (0, 4));
+        assert_eq!(app.tabs.list[0].last_search.as_deref(), Some("hello"));
+        assert!(!app.tabs.list[0].last_search_backward);
+    }
+
+    #[test]
+    fn n_repeats_forward_search() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        app.editor_mut().set_text("foo bar foo baz foo");
+        app.on_event(AppEvent::Key(key(KeyCode::Home, KeyModifiers::NONE)));
+        app.on_event(AppEvent::Key(key(KeyCode::Esc, KeyModifiers::NONE)));
+        app.on_event(AppEvent::Key(key(KeyCode::Char('/'), KeyModifiers::NONE)));
+        for c in "foo".chars() {
+            app.on_event(AppEvent::Key(key(KeyCode::Char(c), KeyModifiers::NONE)));
+        }
+        app.on_event(AppEvent::Key(key(KeyCode::Enter, KeyModifiers::NONE)));
+        // After Enter, cursor on first foo (col 0). n → second (col 8).
+        app.on_event(AppEvent::Key(key(KeyCode::Char('n'), KeyModifiers::NONE)));
+        assert_eq!(app.editor().cursor_pos(), (0, 8));
+        // n → third (col 16).
+        app.on_event(AppEvent::Key(key(KeyCode::Char('n'), KeyModifiers::NONE)));
+        assert_eq!(app.editor().cursor_pos(), (0, 16));
+        // N → reverse direction → second (col 8).
+        app.on_event(AppEvent::Key(key(KeyCode::Char('N'), KeyModifiers::SHIFT)));
+        assert_eq!(app.editor().cursor_pos(), (0, 8));
+    }
+
+    #[test]
+    fn question_mark_searches_backward() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        app.editor_mut().set_text("foo bar foo");
+        // Cursor sits at end (0, 11) after set_text.
+        app.on_event(AppEvent::Key(key(KeyCode::Esc, KeyModifiers::NONE)));
+        app.on_event(AppEvent::Key(key(KeyCode::Char('?'), KeyModifiers::SHIFT)));
+        let f = app.find.as_ref().expect("find open");
+        assert!(f.backward);
+        for c in "foo".chars() {
+            app.on_event(AppEvent::Key(key(KeyCode::Char(c), KeyModifiers::NONE)));
+        }
+        app.on_event(AppEvent::Key(key(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.find.is_none());
+        assert!(app.tabs.list[0].last_search_backward);
+        // Backward from col 11 → second foo at col 8.
+        assert_eq!(app.editor().cursor_pos(), (0, 8));
+    }
+
+    #[test]
+    fn n_after_question_search_repeats_backward() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        app.editor_mut().set_text("foo bar foo baz foo");
+        app.on_event(AppEvent::Key(key(KeyCode::Esc, KeyModifiers::NONE)));
+        // ? foo Enter
+        app.on_event(AppEvent::Key(key(KeyCode::Char('?'), KeyModifiers::SHIFT)));
+        for c in "foo".chars() {
+            app.on_event(AppEvent::Key(key(KeyCode::Char(c), KeyModifiers::NONE)));
+        }
+        app.on_event(AppEvent::Key(key(KeyCode::Enter, KeyModifiers::NONE)));
+        let after_enter = app.editor().cursor_pos();
+        app.on_event(AppEvent::Key(key(KeyCode::Char('n'), KeyModifiers::NONE)));
+        let after_n = app.editor().cursor_pos();
+        assert!(
+            after_n.1 < after_enter.1,
+            "n after ? should move backward in column ({} -> {})",
+            after_enter.1,
+            after_n.1
+        );
+    }
+
+    #[test]
+    fn n_with_no_last_search_shows_toast() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        app.on_event(AppEvent::Key(key(KeyCode::Esc, KeyModifiers::NONE)));
+        app.on_event(AppEvent::Key(key(KeyCode::Char('n'), KeyModifiers::NONE)));
+        let toast = app.toast.as_ref().expect("toast set");
+        assert!(toast.message.contains("no previous search"));
+    }
+
+    #[test]
+    fn esc_during_vim_search_stashes_needle_and_direction() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        app.editor_mut().set_text("foo bar foo");
+        app.on_event(AppEvent::Key(key(KeyCode::Esc, KeyModifiers::NONE)));
+        app.on_event(AppEvent::Key(key(KeyCode::Char('?'), KeyModifiers::SHIFT)));
+        for c in "foo".chars() {
+            app.on_event(AppEvent::Key(key(KeyCode::Char(c), KeyModifiers::NONE)));
+        }
+        app.on_event(AppEvent::Key(key(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(app.find.is_none());
+        assert_eq!(app.tabs.list[0].last_search.as_deref(), Some("foo"));
+        assert!(app.tabs.list[0].last_search_backward);
+    }
 }

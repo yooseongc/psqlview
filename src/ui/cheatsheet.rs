@@ -43,6 +43,18 @@ const ROWS: &[(&str, &str)] = &[
         "count prefix (e.g. 5w \u{2192} 5 words; 0 alone is LineStart)",
     ),
     ("", ""),
+    ("Normal-mode search", ""),
+    (
+        "/ pattern <Enter>",
+        "search forward (Esc cancels; needle stashes for n/N)",
+    ),
+    ("? pattern <Enter>", "search backward"),
+    (
+        "n / N",
+        "repeat last search (n = same direction, N = reverse)",
+    ),
+    ("Ctrl+F / Ctrl+H", "non-modal find / find-replace overlay (fallback)"),
+    ("", ""),
     ("Visual + operators + text objects", ""),
     ("v", "Normal \u{2192} Visual (selection follows motions)"),
     ("d / y / c", "delete / yank / change (op + motion or text obj)"),

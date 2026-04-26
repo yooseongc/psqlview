@@ -46,6 +46,18 @@ pub struct FindState {
     pub mode: FindMode,
     pub replacement: String,
     pub focus: ReplaceFocus,
+    /// `true` when this overlay was opened with vim's `?` (backward).
+    /// Affects which match is initially active and how Enter advances.
+    pub backward: bool,
+    /// When `true`, `Enter` jumps to the active match *and* closes the
+    /// overlay (vim `/foo<Enter>` semantics). When `false`, Enter just
+    /// advances and keeps the overlay open (Ctrl+F semantics).
+    pub enter_closes: bool,
+    /// Cursor position at the moment the overlay opened. When set,
+    /// `recompute` positions `active_idx` at the nearest match in the
+    /// search direction relative to this anchor — matching vim's
+    /// "search starts from cursor" behavior.
+    pub anchor: Option<Cursor>,
 }
 
 impl Default for FindState {
@@ -64,6 +76,9 @@ impl FindState {
             mode: FindMode::Find,
             replacement: String::new(),
             focus: ReplaceFocus::Needle,
+            backward: false,
+            enter_closes: false,
+            anchor: None,
         }
     }
 
@@ -82,9 +97,22 @@ impl FindState {
         }
     }
 
-    /// Rescans `lines` for occurrences of the current needle. Resets
-    /// `active_idx` to `Some(0)` if there's at least one match, else
-    /// `None`. O(N×M) — fine for SQL-buffer sizes.
+    /// Vim-style `/` (forward) / `?` (backward) entry. Anchor records
+    /// the cursor position at open time so each `recompute` activates
+    /// the nearest match in the search direction. Enter closes the
+    /// overlay after jumping.
+    pub fn new_vim_search(backward: bool, anchor: Cursor) -> Self {
+        Self {
+            backward,
+            enter_closes: true,
+            anchor: Some(anchor),
+            ..Self::new()
+        }
+    }
+
+    /// Rescans `lines` for occurrences of the current needle. With an
+    /// `anchor` set, `active_idx` lands on the nearest match in the
+    /// search direction; otherwise it falls back to the first match.
     pub fn recompute(&mut self, lines: &[String]) {
         self.matches.clear();
         if self.needle.is_empty() {
@@ -97,10 +125,24 @@ impl FindState {
                     .push((Cursor::new(row, start), Cursor::new(row, end)));
             }
         }
-        self.active_idx = if self.matches.is_empty() {
-            None
-        } else {
-            Some(0)
+        if self.matches.is_empty() {
+            self.active_idx = None;
+            return;
+        }
+        self.active_idx = match self.anchor {
+            Some(anchor) if self.backward => Some(
+                self.matches
+                    .iter()
+                    .rposition(|(s, _)| (s.row, s.col) < (anchor.row, anchor.col))
+                    .unwrap_or(self.matches.len() - 1),
+            ),
+            Some(anchor) => Some(
+                self.matches
+                    .iter()
+                    .position(|(s, _)| (s.row, s.col) >= (anchor.row, anchor.col))
+                    .unwrap_or(0),
+            ),
+            None => Some(0),
         };
     }
 
@@ -155,6 +197,10 @@ pub enum FindOutcome {
     /// Jump the editor caret to this cursor (the start of the active
     /// match) and keep the overlay open.
     JumpTo(Cursor),
+    /// Vim-style `/foo<Enter>` — jump to this cursor and *close* the
+    /// overlay. Caller stashes the needle and direction onto the
+    /// active tab so subsequent `n` / `N` can repeat the search.
+    JumpAndClose(Cursor),
     /// Replace one range with `text` (caller updates the buffer and
     /// recomputes matches). Used by Enter on the Replacement field in
     /// `FindMode::Replace`.
@@ -214,7 +260,26 @@ pub fn handle_key(state: &mut FindState, key: KeyEvent, lines: &[String]) -> Fin
         KeyCode::Esc => FindOutcome::Cancel,
         // F3 / Enter advance; Shift+F3 retreats. In Replace mode the
         // Enter key on the Needle field also advances; Enter on the
-        // Replacement field is handled above.
+        // Replacement field is handled above. In vim-search mode
+        // (`enter_closes`), Enter closes the overlay after jumping
+        // (and uses `retreat()` if the search direction is backward).
+        KeyCode::Enter if state.enter_closes => {
+            let jumped = if state.backward {
+                state.retreat()
+            } else {
+                // active_idx is already positioned at the nearest match
+                // by recompute — the active position is what Enter should
+                // jump to, not the *next* one. So return active match
+                // directly without advancing.
+                state
+                    .active_idx
+                    .and_then(|i| state.matches.get(i).map(|(s, _)| *s))
+            };
+            match jumped {
+                Some(c) => FindOutcome::JumpAndClose(c),
+                None => FindOutcome::Cancel,
+            }
+        }
         KeyCode::F(3) | KeyCode::Enter if !key.modifiers.contains(KeyModifiers::SHIFT) => {
             match state.advance() {
                 Some(c) => FindOutcome::JumpTo(c),
@@ -502,5 +567,76 @@ mod tests {
         assert_eq!(s.status_label(), "[1/2]");
         s.active_idx = Some(1);
         assert_eq!(s.status_label(), "[2/2]");
+    }
+
+    // ---- vim search semantics (R5) ---------------------------------
+
+    #[test]
+    fn vim_search_anchored_recompute_picks_match_after_cursor() {
+        let lines = vec!["foo bar foo baz foo".to_string()];
+        let mut s = FindState::new_vim_search(false, Cursor::new(0, 5));
+        s.needle = "foo".into();
+        s.recompute(&lines);
+        // First foo at col 0 (before cursor), second at col 8, third at 16.
+        // forward + anchor (0, 5) → first match at-or-after col 5 = idx 1.
+        assert_eq!(s.active_idx, Some(1));
+    }
+
+    #[test]
+    fn vim_search_backward_anchored_picks_match_before_cursor() {
+        let lines = vec!["foo bar foo baz foo".to_string()];
+        let mut s = FindState::new_vim_search(true, Cursor::new(0, 14));
+        s.needle = "foo".into();
+        s.recompute(&lines);
+        // backward + anchor (0, 14) → last match strictly before col 14 = idx 1 (col 8).
+        assert_eq!(s.active_idx, Some(1));
+        assert!(s.backward);
+        assert!(s.enter_closes);
+    }
+
+    #[test]
+    fn vim_search_anchor_after_last_match_wraps_to_first() {
+        let lines = vec!["foo".to_string()];
+        let mut s = FindState::new_vim_search(false, Cursor::new(0, 99));
+        s.needle = "foo".into();
+        s.recompute(&lines);
+        // Forward + anchor past end → wrap to idx 0.
+        assert_eq!(s.active_idx, Some(0));
+    }
+
+    #[test]
+    fn enter_in_vim_search_returns_jump_and_close() {
+        let lines = vec!["foo bar foo".to_string()];
+        let mut s = FindState::new_vim_search(false, Cursor::new(0, 0));
+        s.needle = "foo".into();
+        s.recompute(&lines);
+        let out = handle_key(&mut s, k(KeyCode::Enter, KeyModifiers::NONE), &lines);
+        // Active match is the first foo at col 0 — JumpAndClose to it.
+        assert_eq!(out, FindOutcome::JumpAndClose(Cursor::new(0, 0)));
+    }
+
+    #[test]
+    fn enter_in_backward_vim_search_jumps_to_active_match() {
+        let lines = vec!["foo bar foo".to_string()];
+        let mut s = FindState::new_vim_search(true, Cursor::new(0, 10));
+        s.needle = "foo".into();
+        s.recompute(&lines);
+        let out = handle_key(&mut s, k(KeyCode::Enter, KeyModifiers::NONE), &lines);
+        // Backward + anchor (0, 10) → active is idx 1 (col 8). Backward
+        // Enter calls retreat(), which from idx 1 returns idx 0 (col 0).
+        assert_eq!(out, FindOutcome::JumpAndClose(Cursor::new(0, 0)));
+    }
+
+    #[test]
+    fn ctrl_f_style_enter_keeps_overlay_open() {
+        // Ctrl+F entry: enter_closes = false (Ctrl+F path does not call
+        // new_vim_search). Enter advances and stays open.
+        let lines = vec!["foo bar".to_string()];
+        let mut s = FindState::with_needle("foo".into(), false);
+        s.recompute(&lines);
+        assert!(!s.enter_closes);
+        let out = handle_key(&mut s, k(KeyCode::Enter, KeyModifiers::NONE), &lines);
+        // advance() wraps from 0 back to 0 (only one match), JumpTo not Close.
+        assert!(matches!(out, FindOutcome::JumpTo(_)));
     }
 }

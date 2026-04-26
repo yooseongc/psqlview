@@ -2,6 +2,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{App, FocusPane, QueryStatus, Screen};
 use crate::event::AppEvent;
+use crate::ui::editor::buffer::Cursor;
+use crate::ui::editor::mode::Mode;
 use crate::ui::file_prompt::FilePromptMode;
 use crate::ui::find::{self, FindOutcome, FindState};
 use crate::ui::goto_line::{self, GotoLineOutcome, GotoLineState};
@@ -274,6 +276,38 @@ impl App {
             }
         }
 
+        // Vim-style search keys — only meaningful when the editor pane
+        // is focused and the editor is in Normal mode. `/` opens a
+        // forward search overlay, `?` a backward one; `n` / `N` repeat
+        // the last search using the per-tab `last_search` and
+        // `last_search_backward` slots. The cheatsheet `?` shortcut is
+        // already gated off for editor-focused workspace, so this
+        // doesn't conflict.
+        if self.focus == FocusPane::Editor
+            && matches!(self.editor().mode(), Mode::Normal)
+            && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+        {
+            match key.code {
+                KeyCode::Char('/') if key.modifiers.is_empty() => {
+                    self.open_vim_search(false);
+                    return;
+                }
+                KeyCode::Char('?') => {
+                    self.open_vim_search(true);
+                    return;
+                }
+                KeyCode::Char('n') if key.modifiers.is_empty() => {
+                    self.repeat_vim_search(false);
+                    return;
+                }
+                KeyCode::Char('N') if key.modifiers == KeyModifiers::SHIFT => {
+                    self.repeat_vim_search(true);
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         // While the autocomplete popup is open it consumes most keys first.
         if self.autocomplete.is_some()
             && self.focus == FocusPane::Editor
@@ -491,9 +525,9 @@ impl App {
     }
 
     /// Routes a keystroke into the Find overlay. Edits the needle,
-    /// jumps the caret to matches, and on Esc stashes the needle onto
-    /// the active tab's `last_search` for `n` / `N` repeat after the
-    /// overlay closes. Empty needle on close clears `last_search`.
+    /// jumps the caret to matches, and on Esc / Enter stashes the
+    /// needle (and search direction, for vim mode) onto the active
+    /// tab's `last_search` so `n` / `N` can repeat after close.
     fn handle_find_key(&mut self, key: KeyEvent) {
         let lines: Vec<String> = self.editor().lines().to_vec();
         let outcome = match self.find.as_mut() {
@@ -503,12 +537,36 @@ impl App {
         match outcome {
             FindOutcome::Stay => {}
             FindOutcome::Cancel => {
-                let needle = self.find.as_ref().map(|s| s.needle.clone());
+                let (needle, backward) = self
+                    .find
+                    .as_ref()
+                    .map(|s| (s.needle.clone(), s.backward))
+                    .unwrap_or_default();
                 self.find = None;
-                self.tabs.active_mut().last_search = needle.filter(|n| !n.is_empty());
+                let active = self.tabs.active_mut();
+                if needle.is_empty() {
+                    active.last_search = None;
+                } else {
+                    active.last_search = Some(needle);
+                    active.last_search_backward = backward;
+                }
             }
             FindOutcome::JumpTo(c) => {
                 self.editor_mut().jump_caret(c);
+            }
+            FindOutcome::JumpAndClose(c) => {
+                let (needle, backward) = self
+                    .find
+                    .as_ref()
+                    .map(|s| (s.needle.clone(), s.backward))
+                    .unwrap_or_default();
+                self.find = None;
+                self.editor_mut().jump_caret(c);
+                let active = self.tabs.active_mut();
+                if !needle.is_empty() {
+                    active.last_search = Some(needle);
+                    active.last_search_backward = backward;
+                }
             }
             FindOutcome::ReplaceOne {
                 range: (start, end),
@@ -533,6 +591,60 @@ impl App {
                 }
                 self.toast_info(format!("replaced {count} occurrences"));
             }
+        }
+    }
+
+    /// Vim `/` (forward) / `?` (backward) entry. Opens a fresh Find
+    /// overlay anchored at the cursor; the anchor steers `recompute`
+    /// to the nearest match in the search direction so each typed
+    /// char highlights the right match. Enter closes (vim semantics).
+    fn open_vim_search(&mut self, backward: bool) {
+        let (r, c) = self.editor().cursor_pos();
+        let anchor = Cursor::new(r, c);
+        let mut state = FindState::new_vim_search(backward, anchor);
+        state.recompute(self.editor().lines());
+        self.find = Some(state);
+        self.autocomplete = None;
+    }
+
+    /// Vim `n` (`reverse=false`) / `N` (`reverse=true`) repeat. Looks
+    /// up the active tab's `last_search` + `last_search_backward` and
+    /// jumps to the next/prev match strictly past the cursor. Toasts
+    /// when no last search or no match is found.
+    fn repeat_vim_search(&mut self, reverse: bool) {
+        let active = self.tabs.active();
+        let Some(needle) = active.last_search.clone() else {
+            self.toast_info("no previous search".into());
+            return;
+        };
+        let backward = active.last_search_backward ^ reverse;
+        let lines = self.editor().lines().to_vec();
+        let (cur_row, cur_col) = self.editor().cursor_pos();
+
+        let mut state = FindState::with_needle(needle.clone(), false);
+        state.recompute(&lines);
+        if state.matches.is_empty() {
+            self.toast_info(format!("no match for {needle}"));
+            return;
+        }
+        let target = if backward {
+            state
+                .matches
+                .iter()
+                .rev()
+                .find(|(s, _)| (s.row, s.col) < (cur_row, cur_col))
+                .or_else(|| state.matches.last())
+                .map(|(s, _)| *s)
+        } else {
+            state
+                .matches
+                .iter()
+                .find(|(s, _)| (s.row, s.col) > (cur_row, cur_col))
+                .or_else(|| state.matches.first())
+                .map(|(s, _)| *s)
+        };
+        if let Some(c) = target {
+            self.editor_mut().jump_caret(c);
         }
     }
 }

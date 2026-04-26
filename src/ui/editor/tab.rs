@@ -29,10 +29,15 @@ pub struct TabSlot {
     /// successful Open / Save. Wired in R2 — UI marks the tab title
     /// with a trailing `*` and gates the close-confirmation flow on it.
     pub dirty: bool,
-    /// Needle from the most recent `Ctrl+F` session; retained after
-    /// the overlay closes so `n` / `N` can repeat without retyping.
-    /// Wired in R4.
+    /// Needle from the most recent `Ctrl+F` / vim `/?` session;
+    /// retained after the overlay closes so `n` / `N` can repeat
+    /// without retyping. Wired in R4; vim search re-uses the slot in
+    /// v0.5.0 R5.
     pub last_search: Option<String>,
+    /// Direction of the last vim search (`?` was used). Drives the
+    /// sense of `n` (same direction) vs `N` (opposite). `false` for
+    /// Ctrl+F searches and the `/` direction.
+    pub last_search_backward: bool,
 }
 
 impl TabSlot {
