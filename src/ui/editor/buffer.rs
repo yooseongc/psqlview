@@ -194,7 +194,7 @@ impl TextBuffer {
         Some((removed, start))
     }
 
-    fn delete_range(&mut self, start: Cursor, end: Cursor) {
+    pub fn delete_range(&mut self, start: Cursor, end: Cursor) {
         if start.row == end.row {
             let line = &mut self.lines[start.row];
             let lo = char_to_byte_idx(line, start.col);

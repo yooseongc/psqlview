@@ -1,10 +1,6 @@
-//! SQL editor pane. Self-built — replaces the prior `tui-textarea` wrapper
-//! so that R2 can do per-token syntax coloring (which `tui-textarea` 0.7
-//! cannot express).
-//!
-//! The public surface (`EditorState` + `draw`) is preserved verbatim from
-//! the legacy implementation so call sites in `app.rs` and the integration
-//! tests don't have to change.
+//! SQL editor pane. Self-built — `tui-textarea` 0.7 can't express per-
+//! token syntax coloring, so the buffer + cursor + undo + view layers
+//! live here in-tree. Public surface is `EditorState` + `draw`.
 
 pub mod bracket;
 pub mod buffer;
@@ -43,11 +39,12 @@ enum Operator {
 }
 
 impl Operator {
-    fn key_char(self) -> char {
-        match self {
-            Self::Delete => 'd',
-            Self::Yank => 'y',
-            Self::Change => 'c',
+    fn from_char(c: char) -> Option<Self> {
+        match c {
+            'd' => Some(Self::Delete),
+            'y' => Some(Self::Yank),
+            'c' => Some(Self::Change),
+            _ => None,
         }
     }
 }
@@ -71,9 +68,8 @@ pub struct EditorState {
     /// been seen.
     pending_obj_scope: Option<text_object::Scope>,
     /// Single unnamed register — yanked / deleted text lands here so
-    /// `p` / `P` can paste it back. R4 keeps the register per-tab to
-    /// avoid threading a global through `EditorState`; cross-tab
-    /// sharing can be added later.
+    /// `p` / `P` can paste it back. Per-tab so the data structure
+    /// stays self-contained; cross-tab sharing would need a global.
     register: String,
 }
 
@@ -217,7 +213,7 @@ impl EditorState {
                 self.handle_insert_key(key)
             }
             Mode::Normal => self.handle_normal_key(key),
-            Mode::Visual { .. } => self.handle_visual_key(key),
+            Mode::Visual => self.handle_visual_key(key),
         }
     }
 
@@ -257,20 +253,11 @@ impl EditorState {
         }
 
         // ------ pending chord (gg, no operator) ---------------------
-        if let Some(ch) = self.pending_chord.take() {
-            if let KeyCode::Char(k) = key.code {
-                if ch == 'g' && k == 'g' {
-                    let target_line = if self.pending_count > 0 {
-                        self.pending_count as usize
-                    } else {
-                        1
-                    };
-                    self.pending_count = 0;
-                    self.goto_line(target_line);
-                    return false;
-                }
-            }
-            // Chord broken; key proceeds.
+        if matches_chord_resolution(self.pending_chord.take(), key) {
+            let row = self.take_gg_target_row();
+            self.buf.cancel_selection();
+            self.buf.set_cursor(row, 0);
+            return false;
         }
 
         // ------ digit accumulation ----------------------------------
@@ -280,8 +267,7 @@ impl EditorState {
 
         // ------ motions ---------------------------------------------
         if let Some(motion) = motion_from_keycode(key.code) {
-            let count = self.pending_count.max(1) as usize;
-            self.pending_count = 0;
+            let count = self.take_count();
             let target = motion::apply(&self.buf, motion, count);
             self.buf.cancel_selection();
             self.buf.set_cursor(target.row, target.col);
@@ -290,13 +276,9 @@ impl EditorState {
 
         // ------ goto-line ('G' bare = last line) --------------------
         if matches!(key.code, KeyCode::Char('G')) {
-            let line = if self.pending_count > 0 {
-                self.pending_count as usize
-            } else {
-                self.buf.line_count()
-            };
-            self.pending_count = 0;
-            self.goto_line(line);
+            let row = self.take_capital_g_target_row();
+            self.buf.cancel_selection();
+            self.buf.set_cursor(row, 0);
             return false;
         }
         if matches!(key.code, KeyCode::Char('g')) {
@@ -313,12 +295,7 @@ impl EditorState {
 
         // ------ operators / paste / x -------------------------------
         if let KeyCode::Char(c) = key.code {
-            if let Some(op) = match c {
-                'd' => Some(Operator::Delete),
-                'y' => Some(Operator::Yank),
-                'c' => Some(Operator::Change),
-                _ => None,
-            } {
+            if let Some(op) = Operator::from_char(c) {
                 self.pending_op = Some(op);
                 return false;
             }
@@ -338,11 +315,11 @@ impl EditorState {
             }
             if c == 'p' {
                 self.pending_count = 0;
-                return self.paste_after();
+                return self.paste(true);
             }
             if c == 'P' {
                 self.pending_count = 0;
-                return self.paste_before();
+                return self.paste(false);
             }
         }
 
@@ -436,23 +413,11 @@ impl EditorState {
 
         // Resolve gg-style chord inside operator-pending: `dgg` /
         // `ygg` / `cgg` go linewise from cursor row to the target line.
-        if let Some(ch) = self.pending_chord.take() {
-            if let KeyCode::Char('g') = key.code {
-                if ch == 'g' {
-                    let target_line = if self.pending_count > 0 {
-                        self.pending_count as usize
-                    } else {
-                        1
-                    };
-                    let target_row = target_line
-                        .saturating_sub(1)
-                        .min(self.buf.line_count().saturating_sub(1));
-                    self.reset_pending();
-                    let (s, e) = self.linewise_range_to_row(target_row);
-                    return self.apply_op_range(op, s, e);
-                }
-            }
-            // Chord broken; fall through with chord cleared.
+        if matches_chord_resolution(self.pending_chord.take(), key) {
+            // `dgg` / `ygg` / `cgg` go linewise to the chord-target row.
+            let target_row = self.take_gg_target_row();
+            let (s, e) = self.linewise_range_to_row(target_row);
+            return self.apply_op_range(op, s, e);
         }
 
         // Esc cancels the operator.
@@ -462,9 +427,8 @@ impl EditorState {
         }
 
         // Repeat key (dd / yy / cc) — linewise from cursor.
-        if matches!(key.code, KeyCode::Char(c) if c == op.key_char()) {
-            let count = self.pending_count.max(1) as usize;
-            self.reset_pending();
+        if matches!(key.code, KeyCode::Char(c) if Operator::from_char(c) == Some(op)) {
+            let count = self.take_count();
             let (s, e) = self.linewise_range(count);
             return self.apply_op_range(op, s, e);
         }
@@ -486,23 +450,14 @@ impl EditorState {
 
         // Motion-driven range.
         if let Some(motion) = motion_from_keycode(key.code) {
-            let count = self.pending_count.max(1) as usize;
-            self.reset_pending();
+            let count = self.take_count();
             let (s, e) = self.range_for_motion(motion, count);
             return self.apply_op_range(op, s, e);
         }
 
         // `dG` / `yG` / `cG` — linewise to last line (or count).
         if matches!(key.code, KeyCode::Char('G')) {
-            let target_line = if self.pending_count > 0 {
-                self.pending_count as usize
-            } else {
-                self.buf.line_count()
-            };
-            let target_row = target_line
-                .saturating_sub(1)
-                .min(self.buf.line_count().saturating_sub(1));
-            self.reset_pending();
+            let target_row = self.take_capital_g_target_row();
             let (s, e) = self.linewise_range_to_row(target_row);
             return self.apply_op_range(op, s, e);
         }
@@ -539,33 +494,23 @@ impl EditorState {
 
         // Operators apply to current selection.
         if let KeyCode::Char(c) = key.code {
-            if let Some(op) = match c {
-                'd' | 'x' => Some(Operator::Delete),
-                'y' => Some(Operator::Yank),
-                'c' | 's' => Some(Operator::Change),
-                _ => None,
-            } {
+            // Visual `s` / `x` are aliases for change / delete.
+            let op = match c {
+                'x' => Some(Operator::Delete),
+                's' => Some(Operator::Change),
+                other => Operator::from_char(other),
+            };
+            if let Some(op) = op {
                 return self.apply_op_to_visual(op);
             }
         }
 
-        // Resolve gg chord inside Visual.
-        if let Some(ch) = self.pending_chord.take() {
-            if let KeyCode::Char('g') = key.code {
-                if ch == 'g' {
-                    let target_line = if self.pending_count > 0 {
-                        self.pending_count as usize
-                    } else {
-                        1
-                    };
-                    self.pending_count = 0;
-                    let row = target_line
-                        .saturating_sub(1)
-                        .min(self.buf.line_count().saturating_sub(1));
-                    self.buf.set_cursor(row, 0);
-                    return false;
-                }
-            }
+        // Resolve gg chord inside Visual — selection follows the
+        // cursor without `cancel_selection`.
+        if matches_chord_resolution(self.pending_chord.take(), key) {
+            let row = self.take_gg_target_row();
+            self.buf.set_cursor(row, 0);
+            return false;
         }
 
         if self.try_accumulate_digit(key) {
@@ -573,8 +518,7 @@ impl EditorState {
         }
 
         if let Some(motion) = motion_from_keycode(key.code) {
-            let count = self.pending_count.max(1) as usize;
-            self.pending_count = 0;
+            let count = self.take_count();
             let target = motion::apply(&self.buf, motion, count);
             // Keep selection (anchor stays put).
             self.buf.set_cursor(target.row, target.col);
@@ -582,15 +526,7 @@ impl EditorState {
         }
 
         if matches!(key.code, KeyCode::Char('G')) {
-            let line = if self.pending_count > 0 {
-                self.pending_count as usize
-            } else {
-                self.buf.line_count()
-            };
-            self.pending_count = 0;
-            let row = line
-                .saturating_sub(1)
-                .min(self.buf.line_count().saturating_sub(1));
+            let row = self.take_capital_g_target_row();
             self.buf.set_cursor(row, 0);
             return false;
         }
@@ -604,8 +540,7 @@ impl EditorState {
     }
 
     fn enter_visual(&mut self) {
-        let cursor = self.buf.cursor();
-        self.mode = Mode::Visual { anchor: cursor };
+        self.mode = Mode::Visual;
         self.buf.cancel_selection();
         self.buf.start_selection();
     }
@@ -661,6 +596,40 @@ impl EditorState {
         }
     }
 
+    /// Consumes the pending count and clears every other pending
+    /// state — operator, object scope, chord. Returns at least 1
+    /// so motion handlers can pass it straight through. Called from
+    /// every dispatcher branch that *terminates* a key sequence
+    /// (motion, linewise, mode entry); branches that *queue* state
+    /// (chord starter, scope hint) must skip it.
+    fn take_count(&mut self) -> usize {
+        let n = self.pending_count.max(1) as usize;
+        self.reset_pending();
+        n
+    }
+
+    /// Row index for `gg` / `5gg` (target = pending count or 1).
+    /// Consumes pending state and clamps into the buffer's row range.
+    fn take_gg_target_row(&mut self) -> usize {
+        let line = self.pending_count.max(1) as usize;
+        self.reset_pending();
+        line.saturating_sub(1)
+            .min(self.buf.line_count().saturating_sub(1))
+    }
+
+    /// Row index for `G` / `5G` (target = pending count or last line).
+    /// Consumes pending state and clamps into the buffer's row range.
+    fn take_capital_g_target_row(&mut self) -> usize {
+        let line = if self.pending_count > 0 {
+            self.pending_count as usize
+        } else {
+            self.buf.line_count()
+        };
+        self.reset_pending();
+        line.saturating_sub(1)
+            .min(self.buf.line_count().saturating_sub(1))
+    }
+
     fn reset_pending(&mut self) {
         self.pending_count = 0;
         self.pending_chord = None;
@@ -690,47 +659,30 @@ impl EditorState {
     fn delete_range(&mut self, start: Cursor, end: Cursor) {
         let pre = self.buf.clone();
         self.buf.cancel_selection();
+        self.buf.delete_range(start, end);
         self.buf.set_cursor(start.row, start.col);
-        let count = count_chars_between(self.buf.lines(), start, end);
-        for _ in 0..count {
-            self.buf.delete_forward();
-        }
         self.undo.record(&pre);
     }
 
-    fn paste_after(&mut self) -> bool {
+    /// Paste the unnamed register at the cursor. `after = true` shifts
+    /// past the current char first (vim `p`); `false` inserts at the
+    /// cursor (vim `P`). Borrows the register out via `mem::take` so
+    /// the buffer-mutation borrow doesn't conflict with reading it.
+    fn paste(&mut self, after: bool) -> bool {
         if self.register.is_empty() {
             return false;
         }
         let pre = self.buf.clone();
-        let cur = self.buf.cursor();
-        let line_len = self.buf.line_chars(cur.row);
-        if cur.col < line_len {
-            self.buf.set_cursor(cur.row, cur.col + 1);
-        }
-        for ch in self.register.clone().chars() {
-            if ch == '\n' {
-                self.buf.insert_newline();
-            } else if ch != '\r' {
-                self.buf.insert_char(ch);
+        if after {
+            let cur = self.buf.cursor();
+            let line_len = self.buf.line_chars(cur.row);
+            if cur.col < line_len {
+                self.buf.set_cursor(cur.row, cur.col + 1);
             }
         }
-        self.undo.record(&pre);
-        true
-    }
-
-    fn paste_before(&mut self) -> bool {
-        if self.register.is_empty() {
-            return false;
-        }
-        let pre = self.buf.clone();
-        for ch in self.register.clone().chars() {
-            if ch == '\n' {
-                self.buf.insert_newline();
-            } else if ch != '\r' {
-                self.buf.insert_char(ch);
-            }
-        }
+        let text = std::mem::take(&mut self.register);
+        insert_text(&mut self.buf, &text);
+        self.register = text;
         self.undo.record(&pre);
         true
     }
@@ -802,17 +754,11 @@ impl EditorState {
     /// tabs. Used for bracketed paste. CRLF normalized to LF so Windows
     /// clipboards don't produce blank lines.
     pub fn insert_str(&mut self, s: &str) {
-        let pre = self.buf.clone();
-        let mut changed = false;
-        for c in s.chars() {
-            match c {
-                '\r' => continue,
-                '\n' => self.buf.insert_newline(),
-                other => self.buf.insert_char(other),
-            }
-            changed = true;
+        if s.is_empty() {
+            return;
         }
-        if changed {
+        let pre = self.buf.clone();
+        if insert_text(&mut self.buf, s) {
             self.undo.record(&pre);
         }
     }
@@ -898,13 +844,7 @@ impl EditorState {
         for _ in 0..count {
             self.buf.delete_forward();
         }
-        for c in text.chars() {
-            if c == '\n' {
-                self.buf.insert_newline();
-            } else if c != '\r' {
-                self.buf.insert_char(c);
-            }
-        }
+        insert_text(&mut self.buf, text);
     }
 
     /// Moves the cursor to the 1-based character position used by Postgres
@@ -1028,6 +968,31 @@ impl EditorState {
     }
 }
 
+/// True when a previously-armed chord matches this key. Currently
+/// only `g` + `g` is supported. Returns `false` (with the chord
+/// already cleared by the caller's `take()`) when broken.
+fn matches_chord_resolution(prev_chord: Option<char>, key: KeyEvent) -> bool {
+    matches!((prev_chord, key.code), (Some('g'), KeyCode::Char('g')))
+}
+
+/// Inserts a string at the buffer's cursor, preserving newlines and
+/// dropping `\r` so CRLF clipboards don't produce blank lines. Used
+/// by `insert_str` (bracketed paste), `paste` (vim register), and
+/// `apply_replace` (find/replace replacement). Caller owns the undo
+/// snapshot. Returns `true` if anything was inserted.
+fn insert_text(buf: &mut TextBuffer, s: &str) -> bool {
+    let mut changed = false;
+    for c in s.chars() {
+        match c {
+            '\r' => continue,
+            '\n' => buf.insert_newline(),
+            other => buf.insert_char(other),
+        }
+        changed = true;
+    }
+    changed
+}
+
 fn motion_from_keycode(code: KeyCode) -> Option<Motion> {
     match code {
         KeyCode::Char('h') | KeyCode::Left => Some(Motion::Left),
@@ -1056,38 +1021,11 @@ fn cursor_le(a: Cursor, b: Cursor) -> bool {
     (a.row, a.col) <= (b.row, b.col)
 }
 
-/// Bump a cursor one logical position forward (walking onto the
-/// implicit newline slot at end-of-line). Saturates at end-of-buffer.
-/// Used by operator dispatch to convert an inclusive motion endpoint
-/// into an exclusive one for delete-range.
+/// Bumps a cursor one logical position forward, saturating at end of
+/// buffer. Used by operator dispatch to convert an inclusive motion
+/// endpoint into an exclusive one for delete-range.
 fn step_forward_one(lines: &[String], c: Cursor) -> Cursor {
-    let len = lines.get(c.row).map(|l| l.chars().count()).unwrap_or(0);
-    if c.col < len {
-        Cursor::new(c.row, c.col + 1)
-    } else if c.row + 1 < lines.len() {
-        Cursor::new(c.row + 1, 0)
-    } else {
-        c
-    }
-}
-
-/// Counts char + newline slots strictly between `start` (inclusive)
-/// and `end` (exclusive), matching the number of `delete_forward`
-/// calls needed to consume that range.
-fn count_chars_between(lines: &[String], start: Cursor, end: Cursor) -> usize {
-    if start.row == end.row {
-        return end.col.saturating_sub(start.col);
-    }
-    let mut total = 0;
-    let start_line_len = lines.get(start.row).map(|l| l.chars().count()).unwrap_or(0);
-    total += start_line_len.saturating_sub(start.col);
-    total += 1; // newline at end of start.row
-    for row in (start.row + 1)..end.row {
-        total += lines.get(row).map(|l| l.chars().count()).unwrap_or(0);
-        total += 1;
-    }
-    total += end.col;
-    total
+    motion::step_forward(lines, c).unwrap_or(c)
 }
 
 pub fn draw(
@@ -1104,7 +1042,7 @@ pub fn draw(
         Mode::Normal => Style::default()
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
-        Mode::Visual { .. } => Style::default()
+        Mode::Visual => Style::default()
             .fg(Color::Magenta)
             .add_modifier(Modifier::BOLD),
     };
@@ -1345,7 +1283,7 @@ mod tests {
         assert_eq!(e.text(), "ab");
     }
 
-    // ---- mode state machine (R2) -----------------------------------
+    // ---- mode state machine ----------------------------------------
 
     fn press(e: &mut EditorState, code: KeyCode, mods: KeyModifiers) -> bool {
         e.handle_key(KeyEvent::new(code, mods))
@@ -1372,7 +1310,7 @@ mod tests {
         let mut e = EditorState::new();
         e.type_text("abc");
         press(&mut e, KeyCode::Esc, KeyModifiers::NONE);
-        // 'x' is unmapped in R2 — buffer must not change.
+        // 'x' is currently unmapped here — buffer must not change.
         let before = e.text();
         let dirty = press(&mut e, KeyCode::Char('x'), KeyModifiers::NONE);
         assert!(!dirty);
@@ -1478,7 +1416,7 @@ mod tests {
         assert_eq!(e.text(), "abc");
     }
 
-    // ---- motions + count + chord (R3) ------------------------------
+    // ---- motions + count + chord -----------------------------------
 
     fn enter_normal(e: &mut EditorState) {
         press(e, KeyCode::Esc, KeyModifiers::NONE);
@@ -1684,7 +1622,7 @@ mod tests {
         assert!(e.text().contains('z'));
     }
 
-    // ---- Visual mode + operators + text objects (R4) ---------------
+    // ---- Visual mode + operators + text objects --------------------
 
     #[test]
     fn v_enters_visual_at_cursor() {
@@ -1692,7 +1630,7 @@ mod tests {
         e.type_text("hello");
         enter_normal(&mut e);
         press(&mut e, KeyCode::Char('v'), KeyModifiers::NONE);
-        assert!(matches!(e.mode(), Mode::Visual { .. }));
+        assert_eq!(e.mode(), Mode::Visual);
     }
 
     #[test]

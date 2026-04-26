@@ -71,11 +71,11 @@ impl App {
         }
     }
 
-    fn commit_open(&mut self, path: &std::path::Path) {
+    pub(super) fn commit_open(&mut self, path: &std::path::Path) {
         match std::fs::read_to_string(path) {
             Ok(text) => {
-                // Normalize CRLF so Windows line endings don't show as
-                // blank lines in the editor.
+                // CRLF normalized so Windows line endings don't render
+                // as blank lines.
                 let normalized = text.replace("\r\n", "\n");
                 self.editor_mut().set_text(&normalized);
                 let active = self.tabs.active_mut();
@@ -89,7 +89,7 @@ impl App {
         }
     }
 
-    fn commit_save(&mut self, path: &std::path::Path) {
+    pub(super) fn commit_save(&mut self, path: &std::path::Path) {
         match std::fs::write(path, self.editor().text()) {
             Ok(()) => {
                 let active = self.tabs.active_mut();

@@ -111,8 +111,8 @@ pub struct App {
 
     /// `:` command line — single-line ex prompt. While `Some`, every
     /// editor key routes to it. Slotted between `file_prompt` and
-    /// `find` in the modal precedence chain. `Ctrl+G` opens it as
-    /// well, since `:42` replaces the v0.4 goto-line overlay.
+    /// `find` in the modal precedence chain. `Ctrl+G` opens it too —
+    /// `:42` covers goto-line, so the dedicated overlay was retired.
     pub command_line: Option<CommandLineState>,
 
     /// `Ctrl+F` find / `Ctrl+H` find-replace overlay. While `Some`,
@@ -1614,7 +1614,7 @@ mod tests {
         assert!(cands.iter().any(|s| s == "IN" || s == "INTO" || s == "IS"));
     }
 
-    // ---- vim-style search (R5) -------------------------------------
+    // ---- vim-style search ------------------------------------------
 
     #[test]
     fn slash_in_normal_mode_opens_vim_search_overlay() {
@@ -1757,7 +1757,7 @@ mod tests {
         assert!(app.tabs.list[0].last_search_backward);
     }
 
-    // ---- `:` command line (R6) -------------------------------------
+    // ---- `:` command line ------------------------------------------
 
     fn enter_normal_in_editor(app: &mut App) {
         app.screen = Screen::Workspace;

@@ -24,8 +24,7 @@ impl App {
             return;
         }
 
-        // `:` command line — single-line ex prompt, modal at the same
-        // priority slot the v0.4 goto-line overlay used. Absorbs every
+        // `:` command line — single-line ex prompt. Absorbs every
         // key until Enter / Esc.
         if self.command_line.is_some() {
             self.handle_command_line_key(key);
@@ -589,9 +588,8 @@ impl App {
         replacement: &str,
         global: bool,
     ) {
-        let lines = self.editor().lines().to_vec();
         let mut state = FindState::with_needle(pattern.to_string(), false);
-        state.recompute(&lines);
+        state.recompute(self.editor().lines());
         let cur_row = self.editor().cursor_pos().0;
         let scoped: Vec<_> = state
             .matches
@@ -619,48 +617,24 @@ impl App {
     }
 
     fn execute_write(&mut self, path_arg: Option<String>) {
-        if let Some(arg) = path_arg {
-            let cwd = std::env::current_dir().unwrap_or_default();
-            let path = crate::ui::file_prompt::resolve(&arg, &cwd);
-            match std::fs::write(&path, self.editor().text()) {
-                Ok(()) => {
-                    let active = self.tabs.active_mut();
-                    active.path = Some(path.clone());
-                    active.dirty = false;
-                    self.toast_info(format!("saved: {}", path.display()));
-                }
-                Err(e) => self.toast_error(format!("save failed: {e}")),
-            }
-            return;
-        }
-        // Bare `:w` — silent save when path known, else open Save prompt.
-        if let Some(path) = self.tabs.active().path.clone() {
-            match std::fs::write(&path, self.editor().text()) {
-                Ok(()) => {
-                    self.tabs.active_mut().dirty = false;
-                    self.toast_info(format!("saved: {}", path.display()));
-                }
-                Err(e) => self.toast_error(format!("save failed: {e}")),
-            }
-        } else {
-            self.open_file_prompt(FilePromptMode::Save);
+        // Either an explicit `:w foo.sql` arg, the active tab's known
+        // path, or fall back to the Save prompt.
+        let path = path_arg
+            .map(|arg| {
+                let cwd = std::env::current_dir().unwrap_or_default();
+                crate::ui::file_prompt::resolve(&arg, &cwd)
+            })
+            .or_else(|| self.tabs.active().path.clone());
+        match path {
+            Some(p) => self.commit_save(&p),
+            None => self.open_file_prompt(FilePromptMode::Save),
         }
     }
 
     fn execute_edit(&mut self, arg: &str) {
         let cwd = std::env::current_dir().unwrap_or_default();
         let path = crate::ui::file_prompt::resolve(arg, &cwd);
-        match std::fs::read_to_string(&path) {
-            Ok(text) => {
-                let normalized = text.replace("\r\n", "\n");
-                self.editor_mut().set_text(&normalized);
-                let active = self.tabs.active_mut();
-                active.path = Some(path.clone());
-                active.dirty = false;
-                self.toast_info(format!("opened: {}", path.display()));
-            }
-            Err(e) => self.toast_error(format!("open failed: {e}")),
-        }
+        self.commit_open(&path);
     }
 
     /// Routes a keystroke into the Find overlay. Edits the needle,
@@ -676,36 +650,14 @@ impl App {
         match outcome {
             FindOutcome::Stay => {}
             FindOutcome::Cancel => {
-                let (needle, backward) = self
-                    .find
-                    .as_ref()
-                    .map(|s| (s.needle.clone(), s.backward))
-                    .unwrap_or_default();
-                self.find = None;
-                let active = self.tabs.active_mut();
-                if needle.is_empty() {
-                    active.last_search = None;
-                } else {
-                    active.last_search = Some(needle);
-                    active.last_search_backward = backward;
-                }
+                self.close_find_and_stash_needle();
             }
             FindOutcome::JumpTo(c) => {
                 self.editor_mut().jump_caret(c);
             }
             FindOutcome::JumpAndClose(c) => {
-                let (needle, backward) = self
-                    .find
-                    .as_ref()
-                    .map(|s| (s.needle.clone(), s.backward))
-                    .unwrap_or_default();
-                self.find = None;
+                self.close_find_and_stash_needle();
                 self.editor_mut().jump_caret(c);
-                let active = self.tabs.active_mut();
-                if !needle.is_empty() {
-                    active.last_search = Some(needle);
-                    active.last_search_backward = backward;
-                }
             }
             FindOutcome::ReplaceOne {
                 range: (start, end),
@@ -733,6 +685,25 @@ impl App {
         }
     }
 
+    /// Closes the Find overlay and stashes its needle + direction onto
+    /// the active tab so subsequent `n` / `N` can repeat. An empty
+    /// needle clears the slot so `n` doesn't surface a stale search.
+    fn close_find_and_stash_needle(&mut self) {
+        let (needle, backward) = self
+            .find
+            .as_ref()
+            .map(|s| (s.needle.clone(), s.backward))
+            .unwrap_or_default();
+        self.find = None;
+        let active = self.tabs.active_mut();
+        if needle.is_empty() {
+            active.last_search = None;
+        } else {
+            active.last_search = Some(needle);
+            active.last_search_backward = backward;
+        }
+    }
+
     /// Vim `/` (forward) / `?` (backward) entry. Opens a fresh Find
     /// overlay anchored at the cursor; the anchor steers `recompute`
     /// to the nearest match in the search direction so each typed
@@ -757,11 +728,10 @@ impl App {
             return;
         };
         let backward = active.last_search_backward ^ reverse;
-        let lines = self.editor().lines().to_vec();
         let (cur_row, cur_col) = self.editor().cursor_pos();
 
         let mut state = FindState::with_needle(needle.clone(), false);
-        state.recompute(&lines);
+        state.recompute(self.editor().lines());
         if state.matches.is_empty() {
             self.toast_info(format!("no match for {needle}"));
             return;

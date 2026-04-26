@@ -95,24 +95,12 @@ pub fn quote(
         .enumerate()
         .filter_map(|(i, c)| (*c == quote_char).then_some(i))
         .collect();
-    if positions.len() < 2 {
-        return None;
-    }
-    // Find the smallest pair (i, j) such that i <= col <= j.
-    let mut pair: Option<(usize, usize)> = None;
-    let mut iter = positions.iter();
-    while let Some(&start) = iter.next() {
-        let Some(&end) = iter.clone().next() else {
-            break;
-        };
-        if start <= col && col <= end {
-            pair = Some((start, end));
-            break;
-        }
-        // Advance: consume one
-        let _ = iter.next();
-    }
-    let (lo, hi) = pair?;
+    // Pair quotes left-to-right (1st with 2nd, 3rd with 4th, ...) and
+    // pick the pair that brackets the cursor.
+    let (lo, hi) = positions.chunks_exact(2).find_map(|pair| {
+        let (lo, hi) = (pair[0], pair[1]);
+        (lo <= col && col <= hi).then_some((lo, hi))
+    })?;
     let (s, e) = match scope {
         Scope::Inner => (lo + 1, hi),
         Scope::Around => (lo, hi + 1),

@@ -296,13 +296,7 @@ pub fn handle_key(state: &mut FindState, key: KeyEvent, lines: &[String]) -> Fin
                 FindOutcome::Stay
             } else {
                 state.needle.pop();
-                state.recompute(lines);
-                if let Some(c) = state.matches.first().map(|(s, _)| *s) {
-                    state.active_idx = Some(0);
-                    FindOutcome::JumpTo(c)
-                } else {
-                    FindOutcome::Stay
-                }
+                jump_to_first_after_needle_change(state, lines)
             }
         }
         KeyCode::Char('c') | KeyCode::Char('C')
@@ -318,16 +312,23 @@ pub fn handle_key(state: &mut FindState, key: KeyEvent, lines: &[String]) -> Fin
                 FindOutcome::Stay
             } else {
                 state.needle.push(c);
-                state.recompute(lines);
-                if let Some(c0) = state.matches.first().map(|(s, _)| *s) {
-                    state.active_idx = Some(0);
-                    FindOutcome::JumpTo(c0)
-                } else {
-                    FindOutcome::Stay
-                }
+                jump_to_first_after_needle_change(state, lines)
             }
         }
         _ => FindOutcome::Stay,
+    }
+}
+
+/// Recomputes matches after the needle changed and returns
+/// `JumpTo(first_match)` if any match exists, else `Stay`. Used by
+/// the Backspace and char-input paths.
+fn jump_to_first_after_needle_change(state: &mut FindState, lines: &[String]) -> FindOutcome {
+    state.recompute(lines);
+    if let Some(c) = state.matches.first().map(|(s, _)| *s) {
+        state.active_idx = Some(0);
+        FindOutcome::JumpTo(c)
+    } else {
+        FindOutcome::Stay
     }
 }
 
@@ -569,7 +570,7 @@ mod tests {
         assert_eq!(s.status_label(), "[2/2]");
     }
 
-    // ---- vim search semantics (R5) ---------------------------------
+    // ---- vim search semantics --------------------------------------
 
     #[test]
     fn vim_search_anchored_recompute_picks_match_after_cursor() {

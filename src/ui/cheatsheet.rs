@@ -1,7 +1,7 @@
-//! Centred modal that lists every keybinding. Scrolls vertically because
-//! the list outgrew a single screen once vim modal mappings landed in
-//! v0.5.0. Same `Paragraph::scroll` + `clamp_scroll` shape as the row-
-//! detail modal — keeps the two scrollable overlays consistent.
+//! Centred modal that lists every keybinding. Scrolls vertically
+//! since the list outgrows a small terminal. Reuses the same
+//! `Paragraph::scroll` + `clamp_scroll` shape as the row-detail
+//! modal so both scrollable overlays behave the same way.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};

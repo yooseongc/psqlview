@@ -4,9 +4,7 @@
 //!
 //! `EditorState` itself stays focused on text + cursor + undo so its
 //! `Clone for undo` invariant doesn't have to clone a `PathBuf` per
-//! keystroke. R1 introduces this struct without wiring `path` /
-//! `dirty` / `last_search` — those land in R2 (file-prompt commits)
-//! and R4 (find-state retention).
+//! keystroke.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -23,16 +21,15 @@ use super::EditorState;
 pub struct TabSlot {
     pub editor: EditorState,
     /// Absolute path of the file most recently `Open`ed or `Save`d into
-    /// this tab, or `None` for an "untitled" buffer. Wired in R2.
+    /// this tab, or `None` for an "untitled" buffer.
     pub path: Option<PathBuf>,
     /// `true` when the buffer has unsaved changes since the last
-    /// successful Open / Save. Wired in R2 — UI marks the tab title
-    /// with a trailing `*` and gates the close-confirmation flow on it.
+    /// successful Open / Save. The tab title shows a trailing `*`
+    /// while dirty and the close flow gates on it.
     pub dirty: bool,
     /// Needle from the most recent `Ctrl+F` / vim `/?` session;
     /// retained after the overlay closes so `n` / `N` can repeat
-    /// without retyping. Wired in R4; vim search re-uses the slot in
-    /// v0.5.0 R5.
+    /// without retyping.
     pub last_search: Option<String>,
     /// Direction of the last vim search (`?` was used). Drives the
     /// sense of `n` (same direction) vs `N` (opposite). `false` for

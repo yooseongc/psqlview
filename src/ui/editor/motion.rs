@@ -1,15 +1,11 @@
-//! Vim-style motions, decoupled from the surrounding `EditorState`.
-//!
-//! Pure functions over a `TextBuffer` — no mutation, no side effects.
-//! `apply` walks the buffer once and returns the new cursor position;
-//! the caller is responsible for jumping the buffer caret there.
+//! Vim-style motions over `TextBuffer` — pure functions, no mutation.
+//! `apply` returns the new cursor; the caller jumps the caret.
 //!
 //! Word semantics follow vim's lowercase-`w` definition: characters
-//! are partitioned into three classes (whitespace, identifier
-//! [alphanumeric + `_`], punct), and a word boundary is any class
-//! transition where neither side is whitespace, plus every
-//! whitespace/non-whitespace boundary. Newlines count as whitespace,
-//! so `w` jumps across line boundaries naturally.
+//! partition into three classes (whitespace, identifier, punct).
+//! A word boundary is any class transition where neither side is
+//! whitespace, plus every whitespace/non-whitespace boundary.
+//! Newlines count as whitespace so `w` crosses line boundaries.
 
 use super::bracket;
 use super::buffer::{Cursor, TextBuffer};
@@ -117,7 +113,9 @@ fn class_at(lines: &[String], c: Cursor) -> u8 {
 /// Step one logical position forward; `Some(end-of-buffer)` returns `None`.
 /// Position `(row, line_len)` is the "newline slot" — stepping from there
 /// lands on `(row+1, 0)`.
-fn step_forward(lines: &[String], c: Cursor) -> Option<Cursor> {
+/// Bumps a cursor one logical position forward over the implicit
+/// newline slot at end-of-line. `None` at end-of-buffer.
+pub fn step_forward(lines: &[String], c: Cursor) -> Option<Cursor> {
     let len = line_len(lines, c.row);
     if c.col < len {
         Some(Cursor::new(c.row, c.col + 1))
