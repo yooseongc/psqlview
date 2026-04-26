@@ -10,6 +10,7 @@ pub mod bracket;
 pub mod buffer;
 pub mod edit;
 pub mod mode;
+pub mod motion;
 pub mod render;
 pub mod tab;
 pub mod undo;
@@ -25,6 +26,7 @@ use super::focus_style;
 use buffer::{Cursor, TextBuffer};
 use edit::EditOutcome;
 use mode::Mode;
+use motion::Motion;
 use render::ViewState;
 use undo::UndoStack;
 
@@ -35,6 +37,15 @@ pub struct EditorState {
     undo: UndoStack,
     view: ViewState,
     mode: Mode,
+    /// Accumulated count prefix in Normal mode. `0` means no count
+    /// pending; `1`–`9` followed by any digit (including `0`) extends
+    /// the count. Reset whenever a motion / mode-entry / unmapped key
+    /// fires.
+    pending_count: u32,
+    /// First half of a pending chord (currently only `g` for `gg`).
+    /// `None` means no chord pending. R3 only uses `'g'`; later
+    /// rounds reuse the slot for `dd` / `yy` / `cc`.
+    pending_chord: Option<char>,
 }
 
 impl Default for EditorState {
@@ -50,6 +61,8 @@ impl EditorState {
             undo: UndoStack::new(),
             view: ViewState::default(),
             mode: Mode::default(),
+            pending_count: 0,
+            pending_chord: None,
         }
     }
 
@@ -186,25 +199,124 @@ impl EditorState {
         }
     }
 
-    /// Normal-mode dispatcher. R2 implements the six mode-entry
-    /// primitives (`i a I A o O`); motions / operators land in R3+.
-    /// Returns `true` only when text was actually inserted (`o` / `O`).
+    /// Normal-mode dispatcher.
+    ///
+    /// Dispatch order:
+    /// 1. Modifier combos (Ctrl / Alt) — reset transient state and
+    ///    drop, so App-level shortcuts still fire.
+    /// 2. Pending chord (`g` for `gg`). Resolved on the next key; any
+    ///    non-matching key breaks the chord and falls through, with
+    ///    `pending_count` preserved.
+    /// 3. Digit accumulation. `1`–`9` always extends the count; `0`
+    ///    extends only when a count is already in progress (otherwise
+    ///    `0` is the LineStart motion).
+    /// 4. Motions — `apply` runs `count.max(1)` times.
+    /// 5. `G` / `gg` — count is consumed as a target line number, not
+    ///    a repeat count (`5G` and `5gg` both jump to line 5; bare `G`
+    ///    jumps to last line, bare `gg` to line 1).
+    /// 6. Mode-entry primitives (`i a I A o O`) — same as R2, plus
+    ///    count/chord reset.
+    /// 7. Anything else — swallow, reset count.
+    ///
+    /// Returns `true` only when text was actually inserted (`o` /
+    /// `O`); motions and mode flips report `false` so dirty isn't set
+    /// on pure navigation.
     fn handle_normal_key(&mut self, key: KeyEvent) -> bool {
-        // Drop modifier-laden combos (Ctrl / Alt) — those are reserved
-        // for global shortcuts dispatched by App, not normal-mode
-        // commands. Plain Shift is needed for `I` / `A` / `O`.
         if key
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
         {
+            self.pending_count = 0;
+            self.pending_chord = None;
             return false;
         }
+
+        // Resolve a pending chord. Any non-matching key falls through
+        // with the chord cleared; the count is preserved so a sequence
+        // like `5gx` re-uses the count for the eventual motion.
+        if let Some(ch) = self.pending_chord.take() {
+            if let KeyCode::Char(k) = key.code {
+                if ch == 'g' && k == 'g' {
+                    let target_line = if self.pending_count > 0 {
+                        self.pending_count as usize
+                    } else {
+                        1
+                    };
+                    self.pending_count = 0;
+                    self.goto_line(target_line);
+                    return false;
+                }
+            }
+            // Chord broken; key proceeds through normal handling.
+        }
+
+        // Digit accumulation.
+        match key.code {
+            KeyCode::Char(c @ '1'..='9') => {
+                let d = (c as u8 - b'0') as u32;
+                self.pending_count = self.pending_count.saturating_mul(10).saturating_add(d);
+                return false;
+            }
+            KeyCode::Char('0') if self.pending_count > 0 => {
+                self.pending_count = self.pending_count.saturating_mul(10);
+                return false;
+            }
+            _ => {}
+        }
+
+        // Motion dispatch.
+        let motion = match key.code {
+            KeyCode::Char('h') | KeyCode::Left => Some(Motion::Left),
+            KeyCode::Char('j') | KeyCode::Down => Some(Motion::Down),
+            KeyCode::Char('k') | KeyCode::Up => Some(Motion::Up),
+            KeyCode::Char('l') | KeyCode::Right => Some(Motion::Right),
+            KeyCode::Char('w') => Some(Motion::WordForward),
+            KeyCode::Char('b') => Some(Motion::WordBackward),
+            KeyCode::Char('e') => Some(Motion::WordEnd),
+            KeyCode::Char('0') => Some(Motion::LineStart),
+            KeyCode::Char('^') => Some(Motion::FirstNonBlank),
+            KeyCode::Char('$') => Some(Motion::LineEnd),
+            KeyCode::Char('%') => Some(Motion::MatchingBracket),
+            _ => None,
+        };
+        if let Some(m) = motion {
+            let count = self.pending_count.max(1) as usize;
+            self.pending_count = 0;
+            let target = motion::apply(&self.buf, m, count);
+            self.buf.cancel_selection();
+            self.buf.set_cursor(target.row, target.col);
+            return false;
+        }
+
+        // `G` — goto-line semantics, not a repeat-N motion. With an
+        // explicit count → goto line N; bare → goto last line.
+        if matches!(key.code, KeyCode::Char('G')) {
+            let line = if self.pending_count > 0 {
+                self.pending_count as usize
+            } else {
+                self.buf.line_count()
+            };
+            self.pending_count = 0;
+            self.goto_line(line);
+            return false;
+        }
+
+        // Chord starter: `g`. Wait for the next key without consuming
+        // the count (so `5gg` keeps the 5 around).
+        if matches!(key.code, KeyCode::Char('g')) {
+            self.pending_chord = Some('g');
+            return false;
+        }
+
+        // Mode-entry primitives. All reset count + chord.
         match key.code {
             KeyCode::Char('i') => {
+                self.pending_count = 0;
                 self.mode = Mode::Insert;
                 false
             }
             KeyCode::Char('a') => {
+                self.pending_count = 0;
                 self.buf.cancel_selection();
                 let c = self.buf.cursor();
                 let line_len = self
@@ -218,6 +330,7 @@ impl EditorState {
                 false
             }
             KeyCode::Char('I') => {
+                self.pending_count = 0;
                 self.buf.cancel_selection();
                 let row = self.buf.cursor().row;
                 self.buf.set_cursor(row, 0);
@@ -225,6 +338,7 @@ impl EditorState {
                 false
             }
             KeyCode::Char('A') => {
+                self.pending_count = 0;
                 self.buf.cancel_selection();
                 let row = self.buf.cursor().row;
                 let line_len = self
@@ -238,6 +352,7 @@ impl EditorState {
                 false
             }
             KeyCode::Char('o') => {
+                self.pending_count = 0;
                 let pre = self.buf.clone();
                 self.buf.cancel_selection();
                 let row = self.buf.cursor().row;
@@ -254,6 +369,7 @@ impl EditorState {
                 true
             }
             KeyCode::Char('O') => {
+                self.pending_count = 0;
                 let pre = self.buf.clone();
                 self.buf.cancel_selection();
                 let row = self.buf.cursor().row;
@@ -267,7 +383,10 @@ impl EditorState {
                 self.mode = Mode::Insert;
                 true
             }
-            _ => false,
+            _ => {
+                self.pending_count = 0;
+                false
+            }
         }
     }
 
@@ -900,5 +1019,211 @@ mod tests {
         let dirty = press(&mut e, KeyCode::Char('c'), KeyModifiers::NONE);
         assert!(dirty);
         assert_eq!(e.text(), "abc");
+    }
+
+    // ---- motions + count + chord (R3) ------------------------------
+
+    fn enter_normal(e: &mut EditorState) {
+        press(e, KeyCode::Esc, KeyModifiers::NONE);
+    }
+
+    #[test]
+    fn h_in_normal_moves_left() {
+        let mut e = EditorState::new();
+        e.type_text("hello"); // cursor (0, 5)
+        enter_normal(&mut e);
+        press(&mut e, KeyCode::Char('h'), KeyModifiers::NONE);
+        assert_eq!(e.cursor_pos(), (0, 4));
+    }
+
+    #[test]
+    fn count_prefix_repeats_motion() {
+        let mut e = EditorState::new();
+        e.type_text("hello"); // cursor (0, 5)
+        enter_normal(&mut e);
+        press(&mut e, KeyCode::Char('3'), KeyModifiers::NONE);
+        press(&mut e, KeyCode::Char('h'), KeyModifiers::NONE);
+        assert_eq!(e.cursor_pos(), (0, 2));
+    }
+
+    #[test]
+    fn count_accumulates_across_multiple_digits() {
+        let mut e = EditorState::new();
+        // Build a long line so a 12-step left move actually has room.
+        e.type_text(&"x".repeat(20)); // cursor (0, 20)
+        enter_normal(&mut e);
+        press(&mut e, KeyCode::Char('1'), KeyModifiers::NONE);
+        press(&mut e, KeyCode::Char('2'), KeyModifiers::NONE);
+        press(&mut e, KeyCode::Char('h'), KeyModifiers::NONE);
+        assert_eq!(e.cursor_pos(), (0, 8));
+    }
+
+    #[test]
+    fn count_resets_after_motion_fires() {
+        let mut e = EditorState::new();
+        e.type_text("hello world");
+        enter_normal(&mut e);
+        // 3h moves 3 left, then plain h must move only 1.
+        press(&mut e, KeyCode::Char('3'), KeyModifiers::NONE);
+        press(&mut e, KeyCode::Char('h'), KeyModifiers::NONE);
+        let after_3h = e.cursor_pos();
+        press(&mut e, KeyCode::Char('h'), KeyModifiers::NONE);
+        assert_eq!(e.cursor_pos().1, after_3h.1 - 1);
+    }
+
+    #[test]
+    fn zero_first_is_line_start() {
+        let mut e = EditorState::new();
+        e.type_text("  hello");
+        enter_normal(&mut e);
+        press(&mut e, KeyCode::Char('0'), KeyModifiers::NONE);
+        assert_eq!(e.cursor_pos(), (0, 0));
+    }
+
+    #[test]
+    fn zero_extends_count_when_count_in_progress() {
+        let mut e = EditorState::new();
+        e.type_text(&"x".repeat(20));
+        enter_normal(&mut e);
+        // 1 then 0 should accumulate to 10, not stop at LineStart.
+        press(&mut e, KeyCode::Char('1'), KeyModifiers::NONE);
+        press(&mut e, KeyCode::Char('0'), KeyModifiers::NONE);
+        press(&mut e, KeyCode::Char('h'), KeyModifiers::NONE);
+        assert_eq!(e.cursor_pos(), (0, 10));
+    }
+
+    #[test]
+    fn caret_jumps_to_first_non_blank() {
+        let mut e = EditorState::new();
+        e.type_text("    abc");
+        enter_normal(&mut e);
+        press(&mut e, KeyCode::Char('^'), KeyModifiers::SHIFT);
+        assert_eq!(e.cursor_pos(), (0, 4));
+    }
+
+    #[test]
+    fn dollar_jumps_to_line_end() {
+        let mut e = EditorState::new();
+        e.type_text("abcdef");
+        // Move to start.
+        press(&mut e, KeyCode::Home, KeyModifiers::NONE);
+        enter_normal(&mut e);
+        press(&mut e, KeyCode::Char('$'), KeyModifiers::SHIFT);
+        assert_eq!(e.cursor_pos(), (0, 6));
+    }
+
+    #[test]
+    fn w_jumps_to_next_word_start() {
+        let mut e = EditorState::new();
+        e.type_text("foo bar baz");
+        press(&mut e, KeyCode::Home, KeyModifiers::NONE);
+        enter_normal(&mut e);
+        press(&mut e, KeyCode::Char('w'), KeyModifiers::NONE);
+        assert_eq!(e.cursor_pos(), (0, 4));
+    }
+
+    #[test]
+    fn b_jumps_to_previous_word_start() {
+        let mut e = EditorState::new();
+        e.type_text("foo bar");
+        // cursor (0, 7) end-of-line
+        enter_normal(&mut e);
+        press(&mut e, KeyCode::Char('b'), KeyModifiers::NONE);
+        assert_eq!(e.cursor_pos(), (0, 4));
+    }
+
+    #[test]
+    fn e_jumps_to_word_end() {
+        let mut e = EditorState::new();
+        e.type_text("foo bar");
+        press(&mut e, KeyCode::Home, KeyModifiers::NONE);
+        enter_normal(&mut e);
+        press(&mut e, KeyCode::Char('e'), KeyModifiers::NONE);
+        assert_eq!(e.cursor_pos(), (0, 2));
+    }
+
+    #[test]
+    fn percent_jumps_to_matching_bracket() {
+        let mut e = EditorState::new();
+        e.type_text("(foo)");
+        press(&mut e, KeyCode::Home, KeyModifiers::NONE);
+        enter_normal(&mut e);
+        press(&mut e, KeyCode::Char('%'), KeyModifiers::SHIFT);
+        assert_eq!(e.cursor_pos(), (0, 4));
+    }
+
+    #[test]
+    fn capital_g_with_count_goes_to_line_n() {
+        let mut e = EditorState::new();
+        e.type_text("a\nb\nc\nd\ne");
+        enter_normal(&mut e);
+        press(&mut e, KeyCode::Char('3'), KeyModifiers::NONE);
+        press(&mut e, KeyCode::Char('G'), KeyModifiers::SHIFT);
+        assert_eq!(e.cursor_line_col(), (3, 1));
+    }
+
+    #[test]
+    fn bare_capital_g_goes_to_last_line() {
+        let mut e = EditorState::new();
+        e.type_text("a\nb\nc");
+        // Cursor sits at end of buffer; first move it elsewhere.
+        press(&mut e, KeyCode::Home, KeyModifiers::NONE);
+        press(&mut e, KeyCode::Up, KeyModifiers::NONE);
+        press(&mut e, KeyCode::Up, KeyModifiers::NONE);
+        enter_normal(&mut e);
+        press(&mut e, KeyCode::Char('G'), KeyModifiers::SHIFT);
+        assert_eq!(e.cursor_line_col(), (3, 1));
+    }
+
+    #[test]
+    fn gg_chord_resolves_to_first_line() {
+        let mut e = EditorState::new();
+        e.type_text("a\nb\nc\nd");
+        enter_normal(&mut e);
+        // First g — chord pending, no movement.
+        press(&mut e, KeyCode::Char('g'), KeyModifiers::NONE);
+        let after_first_g = e.cursor_line_col();
+        // Buffer cursor unchanged so far.
+        assert_eq!(after_first_g, e.cursor_line_col());
+        press(&mut e, KeyCode::Char('g'), KeyModifiers::NONE);
+        assert_eq!(e.cursor_line_col(), (1, 1));
+    }
+
+    #[test]
+    fn gg_chord_with_count_goes_to_line_n() {
+        let mut e = EditorState::new();
+        e.type_text("a\nb\nc\nd\ne");
+        enter_normal(&mut e);
+        press(&mut e, KeyCode::Char('5'), KeyModifiers::NONE);
+        press(&mut e, KeyCode::Char('g'), KeyModifiers::NONE);
+        press(&mut e, KeyCode::Char('g'), KeyModifiers::NONE);
+        assert_eq!(e.cursor_line_col(), (5, 1));
+    }
+
+    #[test]
+    fn chord_is_broken_by_unrelated_key() {
+        let mut e = EditorState::new();
+        e.type_text("foo bar");
+        enter_normal(&mut e);
+        press(&mut e, KeyCode::Char('g'), KeyModifiers::NONE);
+        // Now press 'h' — chord breaks, h applies as Left motion.
+        let before = e.cursor_pos();
+        press(&mut e, KeyCode::Char('h'), KeyModifiers::NONE);
+        assert_eq!(e.cursor_pos(), (before.0, before.1.saturating_sub(1)));
+    }
+
+    #[test]
+    fn mode_entry_resets_pending_count() {
+        let mut e = EditorState::new();
+        e.type_text("abc");
+        enter_normal(&mut e);
+        press(&mut e, KeyCode::Char('5'), KeyModifiers::NONE);
+        // 'i' enters Insert and the `5` is dropped, not used as count.
+        press(&mut e, KeyCode::Char('i'), KeyModifiers::NONE);
+        assert_eq!(e.mode(), Mode::Insert);
+        // Type a char to confirm insert mode and that no count lingered.
+        press(&mut e, KeyCode::Char('z'), KeyModifiers::NONE);
+        // Cursor was at (0, 3) before; 5 was dropped; one 'z' inserted.
+        assert!(e.text().contains('z'));
     }
 }
