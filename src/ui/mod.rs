@@ -6,6 +6,7 @@ pub mod connect_dialog;
 pub mod csv_export;
 pub mod editor;
 pub mod file_prompt;
+pub mod find;
 pub mod goto_line;
 pub mod results;
 pub mod row_detail;
@@ -114,7 +115,28 @@ fn draw_workspace(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         )
     };
     editor::tab::draw(frame, &app.tabs, app.active_tab, tabs_rect);
-    editor::draw(frame, app.editor_mut(), editor_focused, editor_inner_rect);
+    // Clone the find matches into a local Vec so its borrow doesn't
+    // alias with the &mut app needed by editor_mut() below. The list
+    // is short (one entry per match in the visible buffer); the copy
+    // is cheap and confined to the draw pass.
+    let find_matches: Vec<_> = app
+        .find
+        .as_ref()
+        .map(|s| s.matches.clone())
+        .unwrap_or_default();
+    let find_active = app.find.as_ref().and_then(|s| s.active_idx);
+    let hints = editor::render::RenderHints {
+        match_pair: None,
+        find_matches: &find_matches,
+        active_match: find_active,
+    };
+    editor::draw(
+        frame,
+        app.editor_mut(),
+        editor_focused,
+        &hints,
+        editor_inner_rect,
+    );
     results::draw(
         frame,
         &mut app.results,
@@ -131,6 +153,9 @@ fn draw_workspace(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
     if let Some(state) = &app.goto_line {
         goto_line::draw(frame, state, editor_rect);
+    }
+    if let Some(state) = &app.find {
+        find::draw(frame, state, editor_rect);
     }
 
     status::draw(frame, app, status_area);

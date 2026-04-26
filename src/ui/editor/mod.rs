@@ -228,6 +228,14 @@ impl EditorState {
         self.buf.set_cursor(target_row, 0);
     }
 
+    /// Jumps the caret to an arbitrary `(row, col)` cursor, clearing
+    /// the selection. Used by the find / find-replace overlay to land
+    /// on the next match.
+    pub fn jump_caret(&mut self, c: buffer::Cursor) {
+        self.buf.cancel_selection();
+        self.buf.set_cursor(c.row, c.col);
+    }
+
     /// Moves the cursor to the 1-based character position used by Postgres
     /// error reports. Returns `true` if the position fell inside the
     /// buffer, `false` if it was past the end.
@@ -349,7 +357,13 @@ impl EditorState {
     }
 }
 
-pub fn draw(frame: &mut Frame<'_>, state: &mut EditorState, focused: bool, area: Rect) {
+pub fn draw(
+    frame: &mut Frame<'_>,
+    state: &mut EditorState,
+    focused: bool,
+    hints: &render::RenderHints<'_>,
+    area: Rect,
+) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" SQL editor  [F5 run \u{00b7} Tab complete] ")
@@ -366,6 +380,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut EditorState, focused: bool, area:
         block,
         placeholder,
         focused,
+        hints,
         area,
     );
 }

@@ -17,6 +17,7 @@ use crate::ui::csv_export;
 use crate::ui::editor::tab::TabSlot;
 use crate::ui::editor::EditorState;
 use crate::ui::file_prompt::{self, FilePromptMode, FilePromptState};
+use crate::ui::find::{self, FindOutcome, FindState};
 use crate::ui::goto_line::{self, GotoLineOutcome, GotoLineState};
 use crate::ui::results::ResultsState;
 use crate::ui::row_detail::RowDetailState;
@@ -174,6 +175,12 @@ pub struct App {
     /// Backspace / Esc reach it.
     pub goto_line: Option<GotoLineState>,
 
+    /// `Ctrl+F` find / `Ctrl+H` find-replace overlay. While `Some`,
+    /// it absorbs editing keystrokes (text into the needle, F3 / Enter
+    /// to advance) — slotted right above the editor pane in the modal
+    /// precedence chain.
+    pub find: Option<FindState>,
+
     /// Two-strike confirm for closing a dirty tab. First `Ctrl+W` on a
     /// dirty tab records `(tab_idx, when)` and shows a toast; a second
     /// `Ctrl+W` on the same tab within 3 seconds discards. Any other
@@ -225,6 +232,7 @@ impl App {
             cheatsheet_open: false,
             file_prompt: None,
             goto_line: None,
+            find: None,
             pending_tab_close: None,
             last_run_sql: None,
             last_ddl_target: None,
@@ -451,6 +459,14 @@ impl App {
             return;
         }
 
+        // Find / Find-Replace overlay — absorbs all keys (printable,
+        // Backspace, Enter / F3 / Shift+F3 advance, Alt+C toggle,
+        // Esc closes).
+        if self.find.is_some() {
+            self.handle_find_key(key);
+            return;
+        }
+
         // Modal overlays capture keys before any pane does.
         if self.cheatsheet_open {
             match key.code {
@@ -659,6 +675,20 @@ impl App {
                 }
                 KeyCode::Char('g') | KeyCode::Char('G') => {
                     self.goto_line = Some(GotoLineState::new());
+                    self.autocomplete = None;
+                    return;
+                }
+                KeyCode::Char('f') | KeyCode::Char('F') => {
+                    // Reuse last_search if any — opening Find with the
+                    // previous needle pre-typed is the natural flow.
+                    let initial = self
+                        .tabs
+                        .get(self.active_tab)
+                        .and_then(|t| t.last_search.clone())
+                        .unwrap_or_default();
+                    let mut state = FindState::with_needle(initial, false);
+                    state.recompute(self.editor().lines());
+                    self.find = Some(state);
                     self.autocomplete = None;
                     return;
                 }
@@ -920,6 +950,33 @@ impl App {
             GotoLineOutcome::Submit(n) => {
                 self.goto_line = None;
                 self.editor_mut().goto_line(n);
+            }
+        }
+    }
+
+    /// Routes a keystroke into the Find overlay. Edits the needle,
+    /// jumps the caret to matches, and on Esc stashes the needle onto
+    /// the active tab's `last_search` for `n` / `N` repeat after the
+    /// overlay closes. Empty needle on close clears `last_search`.
+    fn handle_find_key(&mut self, key: KeyEvent) {
+        // Pull a snapshot of the lines for this single key dispatch —
+        // recompute and the find handler need an immutable slice while
+        // we still need self for the post-action edit jump.
+        let lines: Vec<String> = self.editor().lines().to_vec();
+        let outcome = match self.find.as_mut() {
+            Some(s) => find::handle_key(s, key, &lines),
+            None => return,
+        };
+        match outcome {
+            FindOutcome::Stay => {}
+            FindOutcome::Cancel => {
+                let needle = self.find.as_ref().map(|s| s.needle.clone());
+                self.find = None;
+                let active = self.active_tab;
+                self.tabs[active].last_search = needle.filter(|n| !n.is_empty());
+            }
+            FindOutcome::JumpTo(c) => {
+                self.editor_mut().jump_caret(c);
             }
         }
     }
@@ -1900,6 +1957,97 @@ mod tests {
             KeyModifiers::CONTROL,
         )));
         assert_eq!(app.active_tab, 2);
+    }
+
+    #[test]
+    fn ctrl_f_opens_find_with_recomputed_matches() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        app.editor_mut()
+            .set_text("select foo from bar where foo = 1");
+        app.tabs[0].last_search = Some("foo".into());
+        app.on_event(AppEvent::Key(key(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        )));
+        let f = app.find.as_ref().expect("find open");
+        assert_eq!(f.needle, "foo");
+        assert_eq!(f.matches.len(), 2);
+    }
+
+    #[test]
+    fn typing_into_find_jumps_to_first_match() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        app.editor_mut().set_text("zzz hello hello");
+        app.on_event(AppEvent::Key(key(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        )));
+        for c in "hello".chars() {
+            app.on_event(AppEvent::Key(key(KeyCode::Char(c), KeyModifiers::NONE)));
+        }
+        // Caret jumped to the first 'hello' (col 4).
+        assert_eq!(app.editor().cursor_pos(), (0, 4));
+    }
+
+    #[test]
+    fn esc_closes_find_and_stashes_last_search() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        app.editor_mut().set_text("foo bar");
+        app.on_event(AppEvent::Key(key(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        )));
+        for c in "foo".chars() {
+            app.on_event(AppEvent::Key(key(KeyCode::Char(c), KeyModifiers::NONE)));
+        }
+        app.on_event(AppEvent::Key(key(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(app.find.is_none());
+        assert_eq!(app.tabs[0].last_search.as_deref(), Some("foo"));
+    }
+
+    #[test]
+    fn esc_with_empty_needle_does_not_stash() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        app.on_event(AppEvent::Key(key(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        )));
+        app.on_event(AppEvent::Key(key(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(app.find.is_none());
+        assert!(app.tabs[0].last_search.is_none());
+    }
+
+    #[test]
+    fn reopening_find_prefills_last_search() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        app.editor_mut().set_text("foo bar foo");
+        // First open + Esc stashes the needle.
+        app.on_event(AppEvent::Key(key(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        )));
+        for c in "foo".chars() {
+            app.on_event(AppEvent::Key(key(KeyCode::Char(c), KeyModifiers::NONE)));
+        }
+        app.on_event(AppEvent::Key(key(KeyCode::Esc, KeyModifiers::NONE)));
+        // Reopening — Ctrl+F restores the needle and recomputes matches.
+        app.on_event(AppEvent::Key(key(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        )));
+        let f = app.find.as_ref().expect("find open");
+        assert_eq!(f.needle, "foo");
+        assert_eq!(f.matches.len(), 2);
     }
 
     #[test]

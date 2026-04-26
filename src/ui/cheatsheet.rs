@@ -27,6 +27,10 @@ const ROWS: &[(&str, &str)] = &[
     ("Ctrl+Up / Ctrl+Down", "recall previous / next query"),
     ("Ctrl+O / Ctrl+S", "open / save file (cwd-relative path)"),
     ("Ctrl+G", "goto line (1-based, clamped)"),
+    (
+        "Ctrl+F",
+        "find (Enter / F3 next \u{00b7} Shift+F3 prev \u{00b7} Alt+C case); reopens with last needle",
+    ),
     ("Ctrl+Shift+V (terminal)", "paste (bracketed)"),
     ("", ""),
     ("Editor tabs", ""),

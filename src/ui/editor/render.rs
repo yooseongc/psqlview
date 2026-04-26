@@ -1,7 +1,7 @@
 //! Renders the editor pane: optional Block frame, line numbers in the
 //! gutter, per-token syntax color, selection highlight, cursor-line
-//! underline, bracket-pair reverse-video highlight, and a real terminal
-//! caret via `Frame::set_cursor_position`.
+//! underline, bracket-pair reverse-video highlight, find-match highlight,
+//! and a real terminal caret via `Frame::set_cursor_position`.
 
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -21,6 +21,18 @@ pub struct ViewState {
     pub scroll_top: usize,
 }
 
+/// Layered overlay hints fed into `compute_line_styles`. `match_pair`
+/// marks the two characters of a bracket pair under the cursor, while
+/// `find_matches` lists every (start, end) `Cursor` pair contributed by
+/// the active find / find-replace state — `active_match` indicates
+/// which one to bold.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RenderHints<'a> {
+    pub match_pair: Option<(Cursor, Cursor)>,
+    pub find_matches: &'a [(Cursor, Cursor)],
+    pub active_match: Option<usize>,
+}
+
 impl ViewState {
     /// Adjusts `scroll_top` so the cursor is visible inside `inner_height`.
     /// Called from the draw pass before laying out lines.
@@ -36,6 +48,11 @@ impl ViewState {
     }
 }
 
+// `RenderHints` already bundles the overlay-config args; the rest are
+// frame / buffer / view / block / placeholder / focused / area —
+// each a distinct concern. The R6 refactor pass will revisit a wider
+// `DrawCtx` if more parameters need to ride along.
+#[allow(clippy::too_many_arguments)]
 pub fn draw(
     frame: &mut Frame<'_>,
     buf: &TextBuffer,
@@ -43,6 +60,7 @@ pub fn draw(
     block: Block<'_>,
     placeholder: Option<&str>,
     focused: bool,
+    find_hints: &RenderHints<'_>,
     area: Rect,
 ) {
     let inner = block.inner(area);
@@ -72,6 +90,11 @@ pub fn draw(
         bracket::find_match(buf, cursor).map(|m| (cursor, m))
     } else {
         None
+    };
+    let hints = RenderHints {
+        match_pair,
+        find_matches: find_hints.find_matches,
+        active_match: find_hints.active_match,
     };
 
     // Empty + placeholder.
@@ -121,7 +144,7 @@ pub fn draw(
         ));
 
         // Body content: per-token color + selection bg + cursor-line underline
-        // + bracket-pair highlight.
+        // + bracket-pair highlight + find-match highlight.
         push_styled_line(
             &mut spans,
             raw,
@@ -129,7 +152,7 @@ pub fn draw(
             &mut lex_state,
             selection,
             focused && row == cursor.row,
-            match_pair,
+            &hints,
         );
 
         frame_lines.push(Line::from(spans));
@@ -154,8 +177,8 @@ pub fn draw(
 
 /// Builds the content portion of a line: tokenizes for syntax color,
 /// overlays the selection background, optionally adds underline for the
-/// cursor line and reverse-video for matched brackets, and merges adjacent
-/// same-style chars into Spans.
+/// cursor line, reverse-video for matched brackets, and yellow highlight
+/// for find matches; merges adjacent same-style chars into Spans.
 fn push_styled_line(
     spans: &mut Vec<Span<'static>>,
     line: &str,
@@ -163,10 +186,10 @@ fn push_styled_line(
     lex_state: &mut LexState,
     selection: Option<(Cursor, Cursor)>,
     cursor_line: bool,
-    match_pair: Option<(Cursor, Cursor)>,
+    hints: &RenderHints<'_>,
 ) {
     let chars: Vec<char> = line.chars().collect();
-    let styles = compute_line_styles(line, row, lex_state, selection, cursor_line, match_pair);
+    let styles = compute_line_styles(line, row, lex_state, selection, cursor_line, hints);
     let n = chars.len();
     let mut i = 0;
     while i < n {
@@ -188,7 +211,7 @@ fn compute_line_styles(
     lex_state: &mut LexState,
     selection: Option<(Cursor, Cursor)>,
     cursor_line: bool,
-    match_pair: Option<(Cursor, Cursor)>,
+    hints: &RenderHints<'_>,
 ) -> Vec<Style> {
     let n = line.chars().count();
     let default_style = Style::default().fg(Color::White);
@@ -226,10 +249,30 @@ fn compute_line_styles(
 
     // 4. Bracket-pair highlight via reverse video — keeps the underlying
     // token color but flips fg/bg so the pair pops out regardless of theme.
-    if let Some((a, b)) = match_pair {
+    if let Some((a, b)) = hints.match_pair {
         for pos in [a, b] {
             if pos.row == row && pos.col < n {
                 styles[pos.col] = styles[pos.col].add_modifier(Modifier::REVERSED);
+            }
+        }
+    }
+
+    // 5. Find matches — yellow background + black foreground, with the
+    // currently-active match additionally bolded + reverse-video so it
+    // stands out from its neighbors.
+    for (i, (start, end)) in hints.find_matches.iter().enumerate() {
+        if start.row != row {
+            continue;
+        }
+        let lo = start.col.min(n);
+        let hi = end.col.min(n);
+        let is_active = hints.active_match == Some(i);
+        for slot in &mut styles[lo..hi] {
+            *slot = slot.bg(Color::Yellow).fg(Color::Black);
+            if is_active {
+                *slot = slot
+                    .add_modifier(Modifier::BOLD)
+                    .add_modifier(Modifier::REVERSED);
             }
         }
     }
@@ -368,8 +411,11 @@ mod tests {
     fn bracket_match_marks_both_positions_reversed() {
         let line = "SELECT (a + b) FROM t";
         let mut lex = LexState::default();
-        let pair = Some((Cursor::new(0, 7), Cursor::new(0, 13)));
-        let styles = compute_line_styles(line, 0, &mut lex, None, false, pair);
+        let hints = RenderHints {
+            match_pair: Some((Cursor::new(0, 7), Cursor::new(0, 13))),
+            ..RenderHints::default()
+        };
+        let styles = compute_line_styles(line, 0, &mut lex, None, false, &hints);
         assert!(styles[7].add_modifier.contains(Modifier::REVERSED));
         assert!(styles[13].add_modifier.contains(Modifier::REVERSED));
         assert!(!styles[8].add_modifier.contains(Modifier::REVERSED));
@@ -379,9 +425,11 @@ mod tests {
     fn bracket_match_only_applies_to_matching_row() {
         let line = "a)";
         let mut lex = LexState::default();
-        // Pair spans rows 0 and 2; rendering row 2 should mark only col 0.
-        let pair = Some((Cursor::new(0, 7), Cursor::new(2, 0)));
-        let styles = compute_line_styles(line, 2, &mut lex, None, false, pair);
+        let hints = RenderHints {
+            match_pair: Some((Cursor::new(0, 7), Cursor::new(2, 0))),
+            ..RenderHints::default()
+        };
+        let styles = compute_line_styles(line, 2, &mut lex, None, false, &hints);
         assert!(styles[0].add_modifier.contains(Modifier::REVERSED));
         assert!(!styles[1].add_modifier.contains(Modifier::REVERSED));
     }
@@ -390,10 +438,51 @@ mod tests {
     fn bracket_match_none_leaves_styles_untouched() {
         let line = "SELECT 1";
         let mut lex = LexState::default();
-        let with = compute_line_styles(line, 0, &mut lex, None, false, None);
+        let with = compute_line_styles(line, 0, &mut lex, None, false, &RenderHints::default());
         let mut lex2 = LexState::default();
-        let pair = Some((Cursor::new(99, 0), Cursor::new(99, 1)));
-        let without = compute_line_styles(line, 0, &mut lex2, None, false, pair);
+        let hints_far = RenderHints {
+            match_pair: Some((Cursor::new(99, 0), Cursor::new(99, 1))),
+            ..RenderHints::default()
+        };
+        let without = compute_line_styles(line, 0, &mut lex2, None, false, &hints_far);
         assert_eq!(with, without);
+    }
+
+    #[test]
+    fn find_match_paints_yellow_background_for_each_position() {
+        let line = "SELECT users FROM users";
+        let mut lex = LexState::default();
+        let matches = vec![
+            (Cursor::new(0, 7), Cursor::new(0, 12)),
+            (Cursor::new(0, 18), Cursor::new(0, 23)),
+        ];
+        let hints = RenderHints {
+            match_pair: None,
+            find_matches: &matches,
+            active_match: Some(0),
+        };
+        let styles = compute_line_styles(line, 0, &mut lex, None, false, &hints);
+        // First match (active): yellow bg + reversed + bold.
+        assert_eq!(styles[7].bg, Some(Color::Yellow));
+        assert!(styles[7].add_modifier.contains(Modifier::REVERSED));
+        assert!(styles[7].add_modifier.contains(Modifier::BOLD));
+        // Second match (inactive): yellow bg, no bold/reversed extras.
+        assert_eq!(styles[18].bg, Some(Color::Yellow));
+        assert!(!styles[18].add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn find_match_only_applies_when_row_matches() {
+        let line = "no match here";
+        let mut lex = LexState::default();
+        let matches = vec![(Cursor::new(5, 0), Cursor::new(5, 3))];
+        let hints = RenderHints {
+            find_matches: &matches,
+            ..RenderHints::default()
+        };
+        let styles = compute_line_styles(line, 0, &mut lex, None, false, &hints);
+        for s in styles.iter() {
+            assert!(s.bg != Some(Color::Yellow));
+        }
     }
 }
