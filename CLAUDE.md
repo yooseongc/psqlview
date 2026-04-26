@@ -223,7 +223,11 @@ Keybinding quick-ref (workspace):
 - `F1` or `?` open cheatsheet
 - Editor: `Tab` autocomplete/indent · `Shift+Tab` outdent (block-aware)
   · `Ctrl+Up/Down` recall query history · `Ctrl+O`/`Ctrl+S` open/save
-  file (cwd-relative path)
+  file (cwd-relative path) · `Ctrl+G` goto line · `Ctrl+F` find ·
+  `Ctrl+H` find/replace
+- Editor tabs: `Ctrl+T` new · `Ctrl+W` close (twice within 3s if dirty)
+  · `Ctrl+]` / `Ctrl+[` (or `Ctrl+PageDown`/`Up`) cycle ·
+  `Ctrl+1..9` jump to tab N
 - Tree: `/` incremental search · `n`/`N` repeat · `p` / `Space` preview
   rows of selected table · `D` show synthesized DDL
 - Results: `Enter` row detail · `s` sort current column (Asc→Desc→off)
