@@ -9,6 +9,7 @@ use crate::db::catalog::RelationKind;
 use crate::db::{self, catalog, Session};
 use crate::event::AppEvent;
 use crate::ui::autocomplete::AutocompletePopup;
+use crate::ui::cheatsheet::CheatsheetState;
 use crate::ui::command_line::CommandLineState;
 use crate::ui::connect_dialog::ConnectDialogState;
 use crate::ui::editor::tab::{CloseOutcome, Tabs};
@@ -101,8 +102,8 @@ pub struct App {
     /// row. Opened by Enter on the Results pane.
     pub row_detail: RowDetailState,
 
-    /// Whether the keybinding cheatsheet overlay is visible.
-    pub cheatsheet_open: bool,
+    /// Keybinding cheatsheet overlay (open + scroll position).
+    pub cheatsheet: CheatsheetState,
 
     /// Inline filename prompt for `Ctrl+O` / `Ctrl+S`. While `Some`, the
     /// prompt is modal at the application level — every key routes to it.
@@ -161,7 +162,7 @@ impl App {
             connecting: false,
             autocomplete: None,
             row_detail: RowDetailState::default(),
-            cheatsheet_open: false,
+            cheatsheet: CheatsheetState::default(),
             file_prompt: None,
             command_line: None,
             find: None,
@@ -283,7 +284,7 @@ impl App {
         // Modal overlays (cheatsheet, row detail) eat mouse events too —
         // otherwise clicks fall through to the panes underneath, which
         // looks like the modal isn't actually active.
-        if self.cheatsheet_open || self.row_detail.open {
+        if self.cheatsheet.open || self.row_detail.open {
             return;
         }
         let target = self.pane_rects.hit_test(ev.column, ev.row);
@@ -324,7 +325,7 @@ impl App {
             return;
         }
         // Don't shove pasted text into the editor while a modal is up.
-        if self.cheatsheet_open || self.row_detail.open {
+        if self.cheatsheet.open || self.row_detail.open {
             return;
         }
         self.editor_mut().insert_str(&s);
@@ -1860,7 +1861,59 @@ mod tests {
         let (mut app, _rx) = app_with_channel();
         enter_normal_in_editor(&mut app);
         run_command(&mut app, "help");
-        assert!(app.cheatsheet_open);
+        assert!(app.cheatsheet.open);
+    }
+
+    #[test]
+    fn f1_opens_cheatsheet_and_esc_closes_it() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Tree; // ? gating only excludes editor focus
+        app.on_event(AppEvent::Key(key(KeyCode::F(1), KeyModifiers::NONE)));
+        assert!(app.cheatsheet.open);
+        assert_eq!(app.cheatsheet.scroll, 0);
+        app.on_event(AppEvent::Key(key(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(!app.cheatsheet.open);
+    }
+
+    #[test]
+    fn cheatsheet_pagedown_advances_scroll_offset() {
+        let (mut app, _rx) = app_with_channel();
+        app.on_event(AppEvent::Key(key(KeyCode::F(1), KeyModifiers::NONE)));
+        assert!(app.cheatsheet.open);
+        let before = app.cheatsheet.scroll;
+        app.on_event(AppEvent::Key(key(KeyCode::PageDown, KeyModifiers::NONE)));
+        assert!(app.cheatsheet.scroll > before);
+    }
+
+    #[test]
+    fn cheatsheet_j_scrolls_down_one_line() {
+        let (mut app, _rx) = app_with_channel();
+        app.on_event(AppEvent::Key(key(KeyCode::F(1), KeyModifiers::NONE)));
+        app.on_event(AppEvent::Key(key(KeyCode::Char('j'), KeyModifiers::NONE)));
+        assert_eq!(app.cheatsheet.scroll, 1);
+        app.on_event(AppEvent::Key(key(KeyCode::Char('k'), KeyModifiers::NONE)));
+        assert_eq!(app.cheatsheet.scroll, 0);
+    }
+
+    #[test]
+    fn cheatsheet_q_closes_modal() {
+        let (mut app, _rx) = app_with_channel();
+        app.on_event(AppEvent::Key(key(KeyCode::F(1), KeyModifiers::NONE)));
+        assert!(app.cheatsheet.open);
+        app.on_event(AppEvent::Key(key(KeyCode::Char('q'), KeyModifiers::NONE)));
+        assert!(!app.cheatsheet.open);
+    }
+
+    #[test]
+    fn opening_cheatsheet_resets_scroll() {
+        let (mut app, _rx) = app_with_channel();
+        app.cheatsheet.open();
+        app.cheatsheet.scroll_down(99);
+        app.cheatsheet.close();
+        // Re-open via F1 should reset scroll.
+        app.on_event(AppEvent::Key(key(KeyCode::F(1), KeyModifiers::NONE)));
+        assert_eq!(app.cheatsheet.scroll, 0);
     }
 
     #[test]

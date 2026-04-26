@@ -40,12 +40,20 @@ impl App {
             return;
         }
 
-        // Modal overlays capture keys before any pane does.
-        if self.cheatsheet_open {
+        // Modal overlays capture keys before any pane does. Cheatsheet
+        // is scrollable now, so the handler also routes Up/Down/PageUp/
+        // PageDown into the scroll position.
+        if self.cheatsheet.open {
             match key.code {
                 KeyCode::Esc | KeyCode::Enter | KeyCode::Char('?') | KeyCode::Char('q') => {
-                    self.cheatsheet_open = false;
+                    self.cheatsheet.close();
                 }
+                KeyCode::Up | KeyCode::Char('k') => self.cheatsheet.scroll_up(1),
+                KeyCode::Down | KeyCode::Char('j') => self.cheatsheet.scroll_down(1),
+                KeyCode::PageUp => self.cheatsheet.scroll_up(10),
+                KeyCode::PageDown => self.cheatsheet.scroll_down(10),
+                KeyCode::Home => self.cheatsheet.scroll = 0,
+                KeyCode::End => self.cheatsheet.scroll_down(u16::MAX / 2),
                 _ => {}
             }
             return;
@@ -72,7 +80,7 @@ impl App {
             && !(self.focus == FocusPane::Editor && self.screen == Screen::Workspace);
         let help_via_f1 = matches!(key.code, KeyCode::F(1));
         if help_via_slash || help_via_f1 {
-            self.cheatsheet_open = true;
+            self.cheatsheet.open();
             return;
         }
         // Esc dismisses a visible toast immediately before anything else
@@ -569,7 +577,7 @@ impl App {
                 self.should_quit = true;
             }
             Command::Help => {
-                self.cheatsheet_open = true;
+                self.cheatsheet.open();
             }
         }
     }

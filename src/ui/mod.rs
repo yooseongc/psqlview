@@ -38,8 +38,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             area,
         );
     }
-    if app.cheatsheet_open {
-        cheatsheet::draw(frame, area);
+    if app.cheatsheet.open {
+        cheatsheet::draw(frame, &app.cheatsheet, area);
     }
 
     if let Some(toast) = app.toast.as_ref() {
