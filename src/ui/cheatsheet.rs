@@ -31,6 +31,10 @@ const ROWS: &[(&str, &str)] = &[
         "Ctrl+F",
         "find (Enter / F3 next \u{00b7} Shift+F3 prev \u{00b7} Alt+C case); reopens with last needle",
     ),
+    (
+        "Ctrl+H",
+        "find / replace (Tab field \u{00b7} Enter replace one \u{00b7} Alt+A all)",
+    ),
     ("Ctrl+Shift+V (terminal)", "paste (bracketed)"),
     ("", ""),
     ("Editor tabs", ""),

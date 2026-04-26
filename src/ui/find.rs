@@ -21,12 +21,31 @@ use ratatui::Frame;
 
 use crate::ui::editor::buffer::Cursor;
 
+/// Whether the overlay is in plain Find mode (`Ctrl+F`) or Find/Replace
+/// mode (`Ctrl+H`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FindMode {
+    Find,
+    Replace,
+}
+
+/// Which input field the keystrokes mutate — only meaningful in
+/// `FindMode::Replace`. `Tab` toggles between them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplaceFocus {
+    Needle,
+    Replacement,
+}
+
 #[derive(Debug)]
 pub struct FindState {
     pub needle: String,
     pub case_sensitive: bool,
     pub matches: Vec<(Cursor, Cursor)>,
     pub active_idx: Option<usize>,
+    pub mode: FindMode,
+    pub replacement: String,
+    pub focus: ReplaceFocus,
 }
 
 impl Default for FindState {
@@ -42,6 +61,16 @@ impl FindState {
             case_sensitive: false,
             matches: Vec::new(),
             active_idx: None,
+            mode: FindMode::Find,
+            replacement: String::new(),
+            focus: ReplaceFocus::Needle,
+        }
+    }
+
+    pub fn new_replace() -> Self {
+        Self {
+            mode: FindMode::Replace,
+            ..Self::new()
         }
     }
 
@@ -49,8 +78,7 @@ impl FindState {
         Self {
             needle,
             case_sensitive,
-            matches: Vec::new(),
-            active_idx: None,
+            ..Self::new()
         }
     }
 
@@ -127,6 +155,19 @@ pub enum FindOutcome {
     /// Jump the editor caret to this cursor (the start of the active
     /// match) and keep the overlay open.
     JumpTo(Cursor),
+    /// Replace one range with `text` (caller updates the buffer and
+    /// recomputes matches). Used by Enter on the Replacement field in
+    /// `FindMode::Replace`.
+    ReplaceOne {
+        range: (Cursor, Cursor),
+        text: String,
+    },
+    /// Replace every range in one undo step. Used by `Alt+A` in
+    /// `FindMode::Replace`.
+    ReplaceAll {
+        ranges: Vec<(Cursor, Cursor)>,
+        text: String,
+    },
 }
 
 /// Routes a key into a Find overlay. The needle / matches mutate
@@ -134,10 +175,46 @@ pub enum FindOutcome {
 /// needle changes (handled inside this function for char/backspace,
 /// callers don't have to repeat).
 pub fn handle_key(state: &mut FindState, key: KeyEvent, lines: &[String]) -> FindOutcome {
+    // Replace-mode-only keys come first.
+    if state.mode == FindMode::Replace {
+        match key.code {
+            KeyCode::Tab => {
+                state.focus = match state.focus {
+                    ReplaceFocus::Needle => ReplaceFocus::Replacement,
+                    ReplaceFocus::Replacement => ReplaceFocus::Needle,
+                };
+                return FindOutcome::Stay;
+            }
+            KeyCode::Char('a') | KeyCode::Char('A')
+                if key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                if state.matches.is_empty() {
+                    return FindOutcome::Stay;
+                }
+                let ranges = state.matches.clone();
+                let text = state.replacement.clone();
+                return FindOutcome::ReplaceAll { ranges, text };
+            }
+            KeyCode::Enter if state.focus == ReplaceFocus::Replacement => {
+                let Some(idx) = state.active_idx else {
+                    return FindOutcome::Stay;
+                };
+                let range = state.matches[idx];
+                let text = state.replacement.clone();
+                return FindOutcome::ReplaceOne { range, text };
+            }
+            _ => {}
+        }
+    }
+
+    let mutating_replacement =
+        state.mode == FindMode::Replace && state.focus == ReplaceFocus::Replacement;
+
     match key.code {
         KeyCode::Esc => FindOutcome::Cancel,
-        // F3 / Enter advance; Shift+F3 retreats. Enter while typing
-        // also advances so the overlay feels like a one-handed flow.
+        // F3 / Enter advance; Shift+F3 retreats. In Replace mode the
+        // Enter key on the Needle field also advances; Enter on the
+        // Replacement field is handled above.
         KeyCode::F(3) | KeyCode::Enter if !key.modifiers.contains(KeyModifiers::SHIFT) => {
             match state.advance() {
                 Some(c) => FindOutcome::JumpTo(c),
@@ -149,28 +226,40 @@ pub fn handle_key(state: &mut FindState, key: KeyEvent, lines: &[String]) -> Fin
             None => FindOutcome::Stay,
         },
         KeyCode::Backspace => {
-            state.needle.pop();
-            state.recompute(lines);
-            if let Some(c) = state.matches.first().map(|(s, _)| *s) {
-                state.active_idx = Some(0);
-                FindOutcome::JumpTo(c)
-            } else {
+            if mutating_replacement {
+                state.replacement.pop();
                 FindOutcome::Stay
+            } else {
+                state.needle.pop();
+                state.recompute(lines);
+                if let Some(c) = state.matches.first().map(|(s, _)| *s) {
+                    state.active_idx = Some(0);
+                    FindOutcome::JumpTo(c)
+                } else {
+                    FindOutcome::Stay
+                }
             }
         }
-        KeyCode::Char('c') | KeyCode::Char('C') if key.modifiers.contains(KeyModifiers::ALT) => {
+        KeyCode::Char('c') | KeyCode::Char('C')
+            if key.modifiers.contains(KeyModifiers::ALT) && !mutating_replacement =>
+        {
             state.case_sensitive = !state.case_sensitive;
             state.recompute(lines);
             FindOutcome::Stay
         }
         KeyCode::Char(c) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
-            state.needle.push(c);
-            state.recompute(lines);
-            if let Some(c0) = state.matches.first().map(|(s, _)| *s) {
-                state.active_idx = Some(0);
-                FindOutcome::JumpTo(c0)
-            } else {
+            if mutating_replacement {
+                state.replacement.push(c);
                 FindOutcome::Stay
+            } else {
+                state.needle.push(c);
+                state.recompute(lines);
+                if let Some(c0) = state.matches.first().map(|(s, _)| *s) {
+                    state.active_idx = Some(0);
+                    FindOutcome::JumpTo(c0)
+                } else {
+                    FindOutcome::Stay
+                }
             }
         }
         _ => FindOutcome::Stay,
@@ -213,36 +302,86 @@ fn find_in_line(line: &str, needle: &str, case_insensitive: bool) -> Vec<(usize,
 }
 
 pub fn draw(frame: &mut Frame<'_>, state: &FindState, editor_area: Rect) {
-    if editor_area.height < 3 {
+    let needs_height: u16 = if state.mode == FindMode::Replace {
+        4
+    } else {
+        3
+    };
+    if editor_area.height < needs_height {
         return;
     }
-    let h: u16 = 3;
     let area = Rect {
         x: editor_area.x,
-        y: editor_area.y + editor_area.height - h,
+        y: editor_area.y + editor_area.height - needs_height,
         width: editor_area.width,
-        height: h,
+        height: needs_height,
     };
     let case_label = if state.case_sensitive { "Aa" } else { "aA" };
     let status = state.status_label();
-    let title = format!(
-        " Find {case_label}  {status}  [Enter / F3 next \u{00b7} Shift+F3 prev \u{00b7} Alt+C case \u{00b7} Esc] "
-    );
+    let title = match state.mode {
+        FindMode::Find => format!(
+            " Find {case_label}  {status}  [Enter / F3 next \u{00b7} Shift+F3 prev \u{00b7} Alt+C case \u{00b7} Esc] "
+        ),
+        FindMode::Replace => format!(
+            " Find/Replace {case_label}  {status}  [Tab field \u{00b7} Enter replace \u{00b7} Alt+A all \u{00b7} Esc] "
+        ),
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
         .border_style(Style::default().fg(Color::Yellow));
 
-    let line = Line::from(vec![
+    let needle_active = state.mode == FindMode::Find || state.focus == ReplaceFocus::Needle;
+    let replacement_active =
+        state.mode == FindMode::Replace && state.focus == ReplaceFocus::Replacement;
+    let active_caret = Span::styled("\u{2588}", Style::default().fg(Color::Yellow));
+
+    let mut content_lines: Vec<Line<'static>> = Vec::with_capacity(2);
+    let needle_label_style = if needle_active {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    let mut needle_spans: Vec<Span<'static>> = vec![
+        Span::styled(" Find: ", needle_label_style),
         Span::styled(
             state.needle.clone(),
             Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("\u{2588}", Style::default().fg(Color::Yellow)),
-    ]);
-    let paragraph = Paragraph::new(line).block(block);
+    ];
+    if needle_active {
+        needle_spans.push(active_caret.clone());
+    }
+    content_lines.push(Line::from(needle_spans));
+
+    if state.mode == FindMode::Replace {
+        let label_style = if replacement_active {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        let mut spans: Vec<Span<'static>> = vec![
+            Span::styled(" Repl: ", label_style),
+            Span::styled(
+                state.replacement.clone(),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ];
+        if replacement_active {
+            spans.push(active_caret);
+        }
+        content_lines.push(Line::from(spans));
+    }
+
+    let paragraph = Paragraph::new(content_lines).block(block);
     frame.render_widget(Clear, area);
     frame.render_widget(paragraph, area);
 }

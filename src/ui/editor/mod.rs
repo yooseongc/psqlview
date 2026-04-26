@@ -236,6 +236,50 @@ impl EditorState {
         self.buf.set_cursor(c.row, c.col);
     }
 
+    /// Replaces the inclusive char range `[start, end)` with `text`.
+    /// Single-line ranges only (the find needle is single-line, but the
+    /// replacement itself may contain `\n`s — those split lines as
+    /// `insert_newline` does). Pushes a single undo snapshot.
+    pub fn replace_range(&mut self, start: buffer::Cursor, end: buffer::Cursor, text: &str) {
+        debug_assert!(start.row == end.row);
+        let pre = self.buf.clone();
+        self.apply_replace(start, end, text);
+        self.undo.record(&pre);
+    }
+
+    /// Replaces every range in `ranges` with `text` as a single undo
+    /// transaction. Iterates right-to-left so already-processed
+    /// replacements don't shift the offsets of later ones.
+    pub fn replace_all(&mut self, ranges: &[(buffer::Cursor, buffer::Cursor)], text: &str) {
+        if ranges.is_empty() {
+            return;
+        }
+        let pre = self.buf.clone();
+        // Sort defensively in case the caller didn't.
+        let mut ordered: Vec<_> = ranges.to_vec();
+        ordered.sort_by_key(|(s, _)| (s.row, s.col));
+        for (start, end) in ordered.into_iter().rev() {
+            self.apply_replace(start, end, text);
+        }
+        self.undo.record(&pre);
+    }
+
+    fn apply_replace(&mut self, start: buffer::Cursor, end: buffer::Cursor, text: &str) {
+        self.buf.cancel_selection();
+        self.buf.set_cursor(start.row, start.col);
+        let count = end.col.saturating_sub(start.col);
+        for _ in 0..count {
+            self.buf.delete_forward();
+        }
+        for c in text.chars() {
+            if c == '\n' {
+                self.buf.insert_newline();
+            } else if c != '\r' {
+                self.buf.insert_char(c);
+            }
+        }
+    }
+
     /// Moves the cursor to the 1-based character position used by Postgres
     /// error reports. Returns `true` if the position fell inside the
     /// buffer, `false` if it was past the end.
@@ -522,6 +566,51 @@ mod tests {
         e.type_text("a\nb\nc");
         e.goto_line(99);
         assert_eq!(e.cursor_line_col(), (3, 1));
+    }
+
+    #[test]
+    fn replace_range_swaps_a_single_match() {
+        let mut e = EditorState::new();
+        e.type_text("a foo b");
+        let s = buffer::Cursor::new(0, 2);
+        let end = buffer::Cursor::new(0, 5);
+        e.replace_range(s, end, "BAR");
+        assert_eq!(e.text(), "a BAR b");
+    }
+
+    #[test]
+    fn replace_all_swaps_every_match_and_undo_is_one_step() {
+        let mut e = EditorState::new();
+        e.type_text("a a a");
+        let ranges = vec![
+            (buffer::Cursor::new(0, 0), buffer::Cursor::new(0, 1)),
+            (buffer::Cursor::new(0, 2), buffer::Cursor::new(0, 3)),
+            (buffer::Cursor::new(0, 4), buffer::Cursor::new(0, 5)),
+        ];
+        e.replace_all(&ranges, "bb");
+        assert_eq!(e.text(), "bb bb bb");
+        // Single Ctrl+Z reverts the entire batch.
+        e.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+        assert_eq!(e.text(), "a a a");
+    }
+
+    #[test]
+    fn replace_all_handles_replacement_containing_needle() {
+        // Replacing 'foo' with 'foofoo' must NOT loop — left-to-right
+        // semantics, no rescanning.
+        let mut e = EditorState::new();
+        e.type_text("foo");
+        let ranges = vec![(buffer::Cursor::new(0, 0), buffer::Cursor::new(0, 3))];
+        e.replace_all(&ranges, "foofoo");
+        assert_eq!(e.text(), "foofoo");
+    }
+
+    #[test]
+    fn replace_all_with_empty_ranges_is_noop() {
+        let mut e = EditorState::new();
+        e.type_text("untouched");
+        e.replace_all(&[], "x");
+        assert_eq!(e.text(), "untouched");
     }
 
     #[test]

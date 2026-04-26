@@ -692,6 +692,22 @@ impl App {
                     self.autocomplete = None;
                     return;
                 }
+                KeyCode::Char('h') | KeyCode::Char('H') => {
+                    // Same prefill rule as Ctrl+F — but the overlay
+                    // opens in Replace mode with the Replacement field
+                    // initially empty.
+                    let initial = self
+                        .tabs
+                        .get(self.active_tab)
+                        .and_then(|t| t.last_search.clone())
+                        .unwrap_or_default();
+                    let mut state = FindState::new_replace();
+                    state.needle = initial;
+                    state.recompute(self.editor().lines());
+                    self.find = Some(state);
+                    self.autocomplete = None;
+                    return;
+                }
                 _ => {}
             }
         }
@@ -959,9 +975,6 @@ impl App {
     /// the active tab's `last_search` for `n` / `N` repeat after the
     /// overlay closes. Empty needle on close clears `last_search`.
     fn handle_find_key(&mut self, key: KeyEvent) {
-        // Pull a snapshot of the lines for this single key dispatch —
-        // recompute and the find handler need an immutable slice while
-        // we still need self for the post-action edit jump.
         let lines: Vec<String> = self.editor().lines().to_vec();
         let outcome = match self.find.as_mut() {
             Some(s) => find::handle_key(s, key, &lines),
@@ -977,6 +990,29 @@ impl App {
             }
             FindOutcome::JumpTo(c) => {
                 self.editor_mut().jump_caret(c);
+            }
+            FindOutcome::ReplaceOne {
+                range: (start, end),
+                text,
+            } => {
+                self.editor_mut().replace_range(start, end, &text);
+                self.mark_active_dirty();
+                // Recompute matches against the post-replacement buffer
+                // so the overlay's count and active_idx stay accurate.
+                let lines: Vec<String> = self.editor().lines().to_vec();
+                if let Some(s) = self.find.as_mut() {
+                    s.recompute(&lines);
+                }
+            }
+            FindOutcome::ReplaceAll { ranges, text } => {
+                let count = ranges.len();
+                self.editor_mut().replace_all(&ranges, &text);
+                self.mark_active_dirty();
+                let lines: Vec<String> = self.editor().lines().to_vec();
+                if let Some(s) = self.find.as_mut() {
+                    s.recompute(&lines);
+                }
+                self.toast_info(format!("replaced {count} occurrences"));
             }
         }
     }
@@ -2023,6 +2059,97 @@ mod tests {
         app.on_event(AppEvent::Key(key(KeyCode::Esc, KeyModifiers::NONE)));
         assert!(app.find.is_none());
         assert!(app.tabs[0].last_search.is_none());
+    }
+
+    #[test]
+    fn ctrl_h_opens_find_in_replace_mode() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        app.editor_mut().set_text("foo bar foo");
+        app.on_event(AppEvent::Key(key(
+            KeyCode::Char('h'),
+            KeyModifiers::CONTROL,
+        )));
+        let f = app.find.as_ref().expect("find open");
+        assert_eq!(f.mode, find::FindMode::Replace);
+        assert_eq!(f.focus, find::ReplaceFocus::Needle);
+    }
+
+    #[test]
+    fn replace_one_swaps_active_match_and_marks_dirty() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        app.editor_mut().set_text("foo bar foo");
+        app.tabs[0].dirty = false;
+        app.on_event(AppEvent::Key(key(
+            KeyCode::Char('h'),
+            KeyModifiers::CONTROL,
+        )));
+        for c in "foo".chars() {
+            app.on_event(AppEvent::Key(key(KeyCode::Char(c), KeyModifiers::NONE)));
+        }
+        // Tab to Replacement field, type "BAR".
+        app.on_event(AppEvent::Key(key(KeyCode::Tab, KeyModifiers::NONE)));
+        for c in "BAR".chars() {
+            app.on_event(AppEvent::Key(key(KeyCode::Char(c), KeyModifiers::NONE)));
+        }
+        // Enter on Replacement → replace current (first) match.
+        app.on_event(AppEvent::Key(key(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.editor().text(), "BAR bar foo");
+        assert!(app.tabs[0].dirty);
+    }
+
+    #[test]
+    fn alt_a_replaces_all_in_one_undo_step() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        app.editor_mut().set_text("a a a");
+        app.on_event(AppEvent::Key(key(
+            KeyCode::Char('h'),
+            KeyModifiers::CONTROL,
+        )));
+        // Type needle 'a'.
+        app.on_event(AppEvent::Key(key(KeyCode::Char('a'), KeyModifiers::NONE)));
+        // Tab to Replacement, type 'bb'.
+        app.on_event(AppEvent::Key(key(KeyCode::Tab, KeyModifiers::NONE)));
+        for c in "bb".chars() {
+            app.on_event(AppEvent::Key(key(KeyCode::Char(c), KeyModifiers::NONE)));
+        }
+        // Alt+A → replace all.
+        app.on_event(AppEvent::Key(key(KeyCode::Char('a'), KeyModifiers::ALT)));
+        assert_eq!(app.editor().text(), "bb bb bb");
+        // Esc to close, then Ctrl+Z to undo — single undo reverts the
+        // entire batch.
+        app.on_event(AppEvent::Key(key(KeyCode::Esc, KeyModifiers::NONE)));
+        app.on_event(AppEvent::Key(key(
+            KeyCode::Char('z'),
+            KeyModifiers::CONTROL,
+        )));
+        assert_eq!(app.editor().text(), "a a a");
+    }
+
+    #[test]
+    fn replace_replacement_field_does_not_extend_needle() {
+        let (mut app, _rx) = app_with_channel();
+        app.screen = Screen::Workspace;
+        app.focus = FocusPane::Editor;
+        app.editor_mut().set_text("a");
+        app.on_event(AppEvent::Key(key(
+            KeyCode::Char('h'),
+            KeyModifiers::CONTROL,
+        )));
+        app.on_event(AppEvent::Key(key(KeyCode::Char('a'), KeyModifiers::NONE)));
+        // Tab to Replacement.
+        app.on_event(AppEvent::Key(key(KeyCode::Tab, KeyModifiers::NONE)));
+        for c in "xy".chars() {
+            app.on_event(AppEvent::Key(key(KeyCode::Char(c), KeyModifiers::NONE)));
+        }
+        let f = app.find.as_ref().unwrap();
+        assert_eq!(f.needle, "a");
+        assert_eq!(f.replacement, "xy");
     }
 
     #[test]
