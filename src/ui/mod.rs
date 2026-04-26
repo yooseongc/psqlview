@@ -114,7 +114,7 @@ fn draw_workspace(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             editor_rect,
         )
     };
-    editor::tab::draw(frame, &app.tabs, app.active_tab, tabs_rect);
+    editor::tab::draw(frame, &app.tabs.list, app.tabs.active, tabs_rect);
     // Clone the find matches into a local Vec so its borrow doesn't
     // alias with the &mut app needed by editor_mut() below. The list
     // is short (one entry per match in the visible buffer); the copy

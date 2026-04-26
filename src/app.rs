@@ -14,7 +14,7 @@ use crate::ui::autocomplete::{AutocompletePopup, SQL_KEYWORDS};
 use crate::ui::autocomplete_context::{detect_context, extract_aliases, CompletionContext};
 use crate::ui::connect_dialog::ConnectDialogState;
 use crate::ui::csv_export;
-use crate::ui::editor::tab::TabSlot;
+use crate::ui::editor::tab::{CloseOutcome, Tabs};
 use crate::ui::editor::EditorState;
 use crate::ui::file_prompt::{self, FilePromptMode, FilePromptState};
 use crate::ui::find::{self, FindOutcome, FindState};
@@ -145,12 +145,10 @@ pub struct App {
     pub session: Option<Session>,
 
     pub tree: SchemaTreeState,
-    /// Open editor buffers. There is always at least one tab; closing
-    /// the last tab replaces it with a fresh empty `TabSlot`. R1 ships
-    /// this as a Vec of length 1 — multi-tab UX lands in R2.
-    pub tabs: Vec<TabSlot>,
-    /// Index into `tabs` of the currently active editor.
-    pub active_tab: usize,
+    /// Open editor buffers + active-tab pointer + dirty-close
+    /// confirmation state, all in one container so the App impl
+    /// doesn't have to coordinate three correlated fields.
+    pub tabs: Tabs,
     pub results: ResultsState,
 
     pub focus: FocusPane,
@@ -180,12 +178,6 @@ pub struct App {
     /// to advance) — slotted right above the editor pane in the modal
     /// precedence chain.
     pub find: Option<FindState>,
-
-    /// Two-strike confirm for closing a dirty tab. First `Ctrl+W` on a
-    /// dirty tab records `(tab_idx, when)` and shows a toast; a second
-    /// `Ctrl+W` on the same tab within 3 seconds discards. Any other
-    /// keystroke clears the pending state.
-    pub pending_tab_close: Option<(usize, Instant)>,
 
     /// SQL of the most recently executed query. Retained so error renderers
     /// can place a caret at the reported POSITION.
@@ -221,8 +213,7 @@ impl App {
             connect_dialog: ConnectDialogState::new(ConnInfo::default()),
             session: None,
             tree: SchemaTreeState::default(),
-            tabs: vec![TabSlot::new()],
-            active_tab: 0,
+            tabs: Tabs::new(),
             results: ResultsState::default(),
             focus: FocusPane::Editor,
             query_status: QueryStatus::Idle,
@@ -233,7 +224,6 @@ impl App {
             file_prompt: None,
             goto_line: None,
             find: None,
-            pending_tab_close: None,
             last_run_sql: None,
             last_ddl_target: None,
             history: VecDeque::new(),
@@ -245,96 +235,67 @@ impl App {
         }
     }
 
-    /// Borrow the active tab's editor immutably. Always valid — `tabs`
-    /// is non-empty by construction.
+    /// Borrow the active tab's editor immutably.
     pub fn editor(&self) -> &EditorState {
-        &self.tabs[self.active_tab].editor
+        &self.tabs.active().editor
     }
 
     /// Borrow the active tab's editor mutably.
     pub fn editor_mut(&mut self) -> &mut EditorState {
-        &mut self.tabs[self.active_tab].editor
+        &mut self.tabs.active_mut().editor
     }
 
     // ---- tab management -------------------------------------------
+    //
+    // The data-structure logic (push / cycle / jump / close + dirty
+    // confirmation) lives on `Tabs`. The thin wrappers below are
+    // responsible for the App-level invariants that don't belong on
+    // the data structure: clearing per-tab modal overlays on switch,
+    // surfacing the "unsaved changes" toast on a dirty close.
 
-    /// Mark the active tab as dirty (unsaved). Called after any edit
-    /// keystroke; idempotent.
+    /// Mark the active tab as dirty (unsaved).
     fn mark_active_dirty(&mut self) {
-        self.tabs[self.active_tab].dirty = true;
+        self.tabs.mark_active_dirty();
     }
 
-    /// Pre-tab-switch cleanup: close popups / overlays whose state is
-    /// tied to the buffer that's about to be backgrounded.
+    /// Per-tab modal state that doesn't survive a tab switch — the
+    /// overlays anchor visually to the active editor and would feel
+    /// stale on the next tab.
     fn switch_tab_cleanup(&mut self) {
         self.autocomplete = None;
         self.last_ddl_target = None;
-        self.pending_tab_close = None;
+        self.find = None;
+        self.goto_line = None;
     }
 
-    /// Opens a fresh empty tab and makes it active.
     pub fn new_tab(&mut self) {
         self.switch_tab_cleanup();
-        self.tabs.push(TabSlot::new());
-        self.active_tab = self.tabs.len() - 1;
+        self.tabs.open_new();
     }
 
-    /// Cycles the active tab by `delta` (positive = next, negative =
-    /// previous). Wraps around either end.
     pub fn cycle_tab(&mut self, delta: isize) {
-        let n = self.tabs.len() as isize;
-        if n <= 1 {
-            return;
-        }
-        let next = ((self.active_tab as isize + delta).rem_euclid(n)) as usize;
-        if next != self.active_tab {
+        let prev = self.tabs.active;
+        self.tabs.cycle(delta);
+        if self.tabs.active != prev {
             self.switch_tab_cleanup();
-            self.active_tab = next;
         }
     }
 
-    /// Jumps to tab `idx` if it exists; no-op otherwise.
     pub fn jump_tab(&mut self, idx: usize) {
-        if idx >= self.tabs.len() || idx == self.active_tab {
-            return;
+        let prev = self.tabs.active;
+        self.tabs.jump(idx);
+        if self.tabs.active != prev {
+            self.switch_tab_cleanup();
         }
-        self.switch_tab_cleanup();
-        self.active_tab = idx;
     }
 
-    /// Attempts to close the active tab. Dirty tabs require a
-    /// "double-press within 3 s" confirmation: the first call sets
-    /// `pending_tab_close` + toast, the second within the window
-    /// discards.
     pub fn close_active_tab(&mut self) {
-        let idx = self.active_tab;
-        if !self.tabs[idx].dirty {
-            self.do_close_tab(idx);
-            return;
-        }
-        let now = Instant::now();
-        if let Some((pending_idx, ts)) = self.pending_tab_close {
-            if pending_idx == idx && now.duration_since(ts) < Duration::from_secs(3) {
-                self.pending_tab_close = None;
-                self.do_close_tab(idx);
-                return;
+        match self.tabs.try_close_active() {
+            CloseOutcome::Closed => self.switch_tab_cleanup(),
+            CloseOutcome::PendingDirty => {
+                self.toast_info("unsaved changes — Ctrl+W again to discard".into());
             }
         }
-        self.pending_tab_close = Some((idx, now));
-        self.toast_info("unsaved changes — Ctrl+W again to discard".into());
-    }
-
-    fn do_close_tab(&mut self, idx: usize) {
-        self.tabs.remove(idx);
-        if self.tabs.is_empty() {
-            // The editor pane is never empty — refill with a fresh
-            // untitled tab.
-            self.tabs.push(TabSlot::new());
-            self.active_tab = 0;
-        } else if self.active_tab >= self.tabs.len() {
-            self.active_tab = self.tabs.len() - 1;
-        }
-        self.switch_tab_cleanup();
     }
 
     pub fn on_event(&mut self, ev: AppEvent) {
@@ -576,7 +537,7 @@ impl App {
         let is_ctrl_w = key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(key.code, KeyCode::Char('w') | KeyCode::Char('W'));
         if !is_ctrl_w {
-            self.pending_tab_close = None;
+            self.tabs.pending_close = None;
         }
 
         // Incremental search in the tree pane absorbs every key until
@@ -681,11 +642,7 @@ impl App {
                 KeyCode::Char('f') | KeyCode::Char('F') => {
                     // Reuse last_search if any — opening Find with the
                     // previous needle pre-typed is the natural flow.
-                    let initial = self
-                        .tabs
-                        .get(self.active_tab)
-                        .and_then(|t| t.last_search.clone())
-                        .unwrap_or_default();
+                    let initial = self.tabs.active().last_search.clone().unwrap_or_default();
                     let mut state = FindState::with_needle(initial, false);
                     state.recompute(self.editor().lines());
                     self.find = Some(state);
@@ -696,11 +653,7 @@ impl App {
                     // Same prefill rule as Ctrl+F — but the overlay
                     // opens in Replace mode with the Replacement field
                     // initially empty.
-                    let initial = self
-                        .tabs
-                        .get(self.active_tab)
-                        .and_then(|t| t.last_search.clone())
-                        .unwrap_or_default();
+                    let initial = self.tabs.active().last_search.clone().unwrap_or_default();
                     let mut state = FindState::new_replace();
                     state.needle = initial;
                     state.recompute(self.editor().lines());
@@ -985,8 +938,7 @@ impl App {
             FindOutcome::Cancel => {
                 let needle = self.find.as_ref().map(|s| s.needle.clone());
                 self.find = None;
-                let active = self.active_tab;
-                self.tabs[active].last_search = needle.filter(|n| !n.is_empty());
+                self.tabs.active_mut().last_search = needle.filter(|n| !n.is_empty());
             }
             FindOutcome::JumpTo(c) => {
                 self.editor_mut().jump_caret(c);
@@ -1039,9 +991,9 @@ impl App {
                     // blank lines in the editor.
                     let normalized = text.replace("\r\n", "\n");
                     self.editor_mut().set_text(&normalized);
-                    let active = self.active_tab;
-                    self.tabs[active].path = Some(path.clone());
-                    self.tabs[active].dirty = false;
+                    let active = self.tabs.active_mut();
+                    active.path = Some(path.clone());
+                    active.dirty = false;
                     self.toast_info(format!("opened: {}", path.display()));
                 }
                 Err(e) => {
@@ -1050,9 +1002,9 @@ impl App {
             },
             FilePromptMode::Save => match std::fs::write(&path, self.editor().text()) {
                 Ok(()) => {
-                    let active = self.active_tab;
-                    self.tabs[active].path = Some(path.clone());
-                    self.tabs[active].dirty = false;
+                    let active = self.tabs.active_mut();
+                    active.path = Some(path.clone());
+                    active.dirty = false;
                     self.toast_info(format!("saved: {}", path.display()));
                 }
                 Err(e) => {
@@ -1776,12 +1728,12 @@ mod tests {
     #[test]
     fn fresh_app_has_one_active_tab() {
         let (app, _rx) = app_with_channel();
-        assert_eq!(app.tabs.len(), 1);
-        assert_eq!(app.active_tab, 0);
+        assert_eq!(app.tabs.list.len(), 1);
+        assert_eq!(app.tabs.active, 0);
         // Active tab is fresh: empty buffer, no path, not dirty.
         assert_eq!(app.editor().text(), "");
-        assert!(app.tabs[0].path.is_none());
-        assert!(!app.tabs[0].dirty);
+        assert!(app.tabs.list[0].path.is_none());
+        assert!(!app.tabs.list[0].dirty);
     }
 
     #[test]
@@ -1789,7 +1741,7 @@ mod tests {
         let (mut app, _rx) = app_with_channel();
         app.editor_mut().set_text("abc");
         assert_eq!(app.editor().text(), "abc");
-        assert_eq!(app.tabs[app.active_tab].editor.text(), "abc");
+        assert_eq!(app.tabs.list[app.tabs.active].editor.text(), "abc");
     }
 
     #[test]
@@ -1797,11 +1749,11 @@ mod tests {
         let (mut app, _rx) = app_with_channel();
         app.editor_mut().set_text("first");
         app.new_tab();
-        assert_eq!(app.tabs.len(), 2);
-        assert_eq!(app.active_tab, 1);
+        assert_eq!(app.tabs.list.len(), 2);
+        assert_eq!(app.tabs.active, 1);
         assert_eq!(app.editor().text(), "");
         // First tab's content survives.
-        assert_eq!(app.tabs[0].editor.text(), "first");
+        assert_eq!(app.tabs.list[0].editor.text(), "first");
     }
 
     #[test]
@@ -1811,18 +1763,18 @@ mod tests {
         app.new_tab();
         // tabs.len() == 3, active = 2
         app.cycle_tab(1);
-        assert_eq!(app.active_tab, 0); // wrapped
+        assert_eq!(app.tabs.active, 0); // wrapped
         app.cycle_tab(-1);
-        assert_eq!(app.active_tab, 2); // wrapped backwards
+        assert_eq!(app.tabs.active, 2); // wrapped backwards
     }
 
     #[test]
     fn cycle_tab_with_one_tab_is_noop() {
         let (mut app, _rx) = app_with_channel();
         app.cycle_tab(1);
-        assert_eq!(app.active_tab, 0);
+        assert_eq!(app.tabs.active, 0);
         app.cycle_tab(-1);
-        assert_eq!(app.active_tab, 0);
+        assert_eq!(app.tabs.active, 0);
     }
 
     #[test]
@@ -1830,7 +1782,7 @@ mod tests {
         let (mut app, _rx) = app_with_channel();
         app.new_tab();
         app.jump_tab(99);
-        assert_eq!(app.active_tab, 1);
+        assert_eq!(app.tabs.active, 1);
     }
 
     #[test]
@@ -1838,43 +1790,43 @@ mod tests {
         let (mut app, _rx) = app_with_channel();
         app.new_tab();
         app.editor_mut().set_text("scratch");
-        app.tabs[app.active_tab].dirty = false; // explicit: clean
+        app.tabs.list[app.tabs.active].dirty = false; // explicit: clean
         app.close_active_tab();
-        assert_eq!(app.tabs.len(), 1);
-        assert!(app.pending_tab_close.is_none());
+        assert_eq!(app.tabs.list.len(), 1);
+        assert!(app.tabs.pending_close.is_none());
     }
 
     #[test]
     fn close_dirty_tab_requires_two_strikes() {
         let (mut app, _rx) = app_with_channel();
         app.new_tab();
-        app.tabs[app.active_tab].dirty = true;
+        app.tabs.list[app.tabs.active].dirty = true;
         // First strike — toast, no close.
         app.close_active_tab();
-        assert_eq!(app.tabs.len(), 2);
-        assert!(app.pending_tab_close.is_some());
+        assert_eq!(app.tabs.list.len(), 2);
+        assert!(app.tabs.pending_close.is_some());
         let toast = app.toast.as_ref().expect("toast set");
         assert!(toast.message.contains("unsaved"));
         // Second strike within window — closes.
         app.close_active_tab();
-        assert_eq!(app.tabs.len(), 1);
-        assert!(app.pending_tab_close.is_none());
+        assert_eq!(app.tabs.list.len(), 1);
+        assert!(app.tabs.pending_close.is_none());
     }
 
     #[test]
     fn close_dirty_tab_resets_pending_after_window() {
         let (mut app, _rx) = app_with_channel();
         app.new_tab();
-        app.tabs[app.active_tab].dirty = true;
+        app.tabs.list[app.tabs.active].dirty = true;
         app.close_active_tab();
         // Force the pending timestamp to look stale.
-        let (idx, _) = app.pending_tab_close.unwrap();
-        app.pending_tab_close = Some((idx, Instant::now() - Duration::from_secs(10)));
+        let (idx, _) = app.tabs.pending_close.unwrap();
+        app.tabs.pending_close = Some((idx, Instant::now() - Duration::from_secs(10)));
         // Second strike past the 3s window resets to "first strike",
         // not a close.
         app.close_active_tab();
-        assert_eq!(app.tabs.len(), 2);
-        assert!(app.pending_tab_close.is_some());
+        assert_eq!(app.tabs.list.len(), 2);
+        assert!(app.tabs.pending_close.is_some());
     }
 
     #[test]
@@ -1882,11 +1834,11 @@ mod tests {
         let (mut app, _rx) = app_with_channel();
         app.editor_mut().set_text("only");
         // Force dirty=false so it closes immediately.
-        app.tabs[0].dirty = false;
+        app.tabs.list[0].dirty = false;
         app.close_active_tab();
-        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.tabs.list.len(), 1);
         assert_eq!(app.editor().text(), "");
-        assert_eq!(app.active_tab, 0);
+        assert_eq!(app.tabs.active, 0);
     }
 
     #[test]
@@ -1894,9 +1846,9 @@ mod tests {
         let (mut app, _rx) = app_with_channel();
         app.screen = Screen::Workspace;
         app.focus = FocusPane::Editor;
-        assert!(!app.tabs[0].dirty);
+        assert!(!app.tabs.list[0].dirty);
         type_str(&mut app, "x");
-        assert!(app.tabs[0].dirty);
+        assert!(app.tabs.list[0].dirty);
     }
 
     #[test]
@@ -1907,7 +1859,7 @@ mod tests {
         // Right arrow on an empty buffer is a no-op edit; dirty stays
         // false. (Left/Right at position 0 / end are also no-ops.)
         app.on_event(AppEvent::Key(key(KeyCode::Right, KeyModifiers::NONE)));
-        assert!(!app.tabs[0].dirty);
+        assert!(!app.tabs.list[0].dirty);
     }
 
     #[test]
@@ -1916,7 +1868,7 @@ mod tests {
         app.screen = Screen::Workspace;
         app.focus = FocusPane::Editor;
         type_str(&mut app, "SELECT 1;");
-        assert!(app.tabs[0].dirty);
+        assert!(app.tabs.list[0].dirty);
 
         app.on_event(AppEvent::Key(key(
             KeyCode::Char('s'),
@@ -1928,8 +1880,8 @@ mod tests {
         }
         app.on_event(AppEvent::Key(key(KeyCode::Enter, KeyModifiers::NONE)));
 
-        assert!(!app.tabs[0].dirty);
-        assert_eq!(app.tabs[0].path.as_deref(), Some(path.as_path()));
+        assert!(!app.tabs.list[0].dirty);
+        assert_eq!(app.tabs.list[0].path.as_deref(), Some(path.as_path()));
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1951,8 +1903,8 @@ mod tests {
         }
         app.on_event(AppEvent::Key(key(KeyCode::Enter, KeyModifiers::NONE)));
 
-        assert!(!app.tabs[0].dirty);
-        assert_eq!(app.tabs[0].path.as_deref(), Some(path.as_path()));
+        assert!(!app.tabs.list[0].dirty);
+        assert_eq!(app.tabs.list[0].path.as_deref(), Some(path.as_path()));
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1965,8 +1917,8 @@ mod tests {
             KeyCode::Char('t'),
             KeyModifiers::CONTROL,
         )));
-        assert_eq!(app.tabs.len(), 2);
-        assert_eq!(app.active_tab, 1);
+        assert_eq!(app.tabs.list.len(), 2);
+        assert_eq!(app.tabs.active, 1);
         assert_eq!(app.focus, FocusPane::Editor);
     }
 
@@ -1981,18 +1933,18 @@ mod tests {
             KeyCode::Char('1'),
             KeyModifiers::CONTROL,
         )));
-        assert_eq!(app.active_tab, 0);
+        assert_eq!(app.tabs.active, 0);
         app.on_event(AppEvent::Key(key(
             KeyCode::Char('3'),
             KeyModifiers::CONTROL,
         )));
-        assert_eq!(app.active_tab, 2);
+        assert_eq!(app.tabs.active, 2);
         // Out-of-range is silently ignored.
         app.on_event(AppEvent::Key(key(
             KeyCode::Char('9'),
             KeyModifiers::CONTROL,
         )));
-        assert_eq!(app.active_tab, 2);
+        assert_eq!(app.tabs.active, 2);
     }
 
     #[test]
@@ -2002,7 +1954,7 @@ mod tests {
         app.focus = FocusPane::Editor;
         app.editor_mut()
             .set_text("select foo from bar where foo = 1");
-        app.tabs[0].last_search = Some("foo".into());
+        app.tabs.list[0].last_search = Some("foo".into());
         app.on_event(AppEvent::Key(key(
             KeyCode::Char('f'),
             KeyModifiers::CONTROL,
@@ -2044,7 +1996,7 @@ mod tests {
         }
         app.on_event(AppEvent::Key(key(KeyCode::Esc, KeyModifiers::NONE)));
         assert!(app.find.is_none());
-        assert_eq!(app.tabs[0].last_search.as_deref(), Some("foo"));
+        assert_eq!(app.tabs.list[0].last_search.as_deref(), Some("foo"));
     }
 
     #[test]
@@ -2058,7 +2010,7 @@ mod tests {
         )));
         app.on_event(AppEvent::Key(key(KeyCode::Esc, KeyModifiers::NONE)));
         assert!(app.find.is_none());
-        assert!(app.tabs[0].last_search.is_none());
+        assert!(app.tabs.list[0].last_search.is_none());
     }
 
     #[test]
@@ -2082,7 +2034,7 @@ mod tests {
         app.screen = Screen::Workspace;
         app.focus = FocusPane::Editor;
         app.editor_mut().set_text("foo bar foo");
-        app.tabs[0].dirty = false;
+        app.tabs.list[0].dirty = false;
         app.on_event(AppEvent::Key(key(
             KeyCode::Char('h'),
             KeyModifiers::CONTROL,
@@ -2098,7 +2050,7 @@ mod tests {
         // Enter on Replacement → replace current (first) match.
         app.on_event(AppEvent::Key(key(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.editor().text(), "BAR bar foo");
-        assert!(app.tabs[0].dirty);
+        assert!(app.tabs.list[0].dirty);
     }
 
     #[test]
@@ -2252,7 +2204,7 @@ mod tests {
         app.focus = FocusPane::Editor;
         app.new_tab(); // tabs = 2, active = 1
         app.on_event(AppEvent::Key(key(KeyCode::PageDown, KeyModifiers::CONTROL)));
-        assert_eq!(app.active_tab, 0); // wrap from 1 → 0
+        assert_eq!(app.tabs.active, 0); // wrap from 1 → 0
     }
 
     #[test]
@@ -2261,15 +2213,15 @@ mod tests {
         app.screen = Screen::Workspace;
         app.focus = FocusPane::Editor;
         app.new_tab();
-        app.tabs[app.active_tab].dirty = true;
+        app.tabs.list[app.tabs.active].dirty = true;
         app.on_event(AppEvent::Key(key(
             KeyCode::Char('w'),
             KeyModifiers::CONTROL,
         )));
-        assert!(app.pending_tab_close.is_some());
+        assert!(app.tabs.pending_close.is_some());
         // Any non-Ctrl+W key clears it.
         app.on_event(AppEvent::Key(key(KeyCode::Char('a'), KeyModifiers::NONE)));
-        assert!(app.pending_tab_close.is_none());
+        assert!(app.tabs.pending_close.is_none());
     }
 
     #[test]
