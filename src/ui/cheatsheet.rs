@@ -28,7 +28,7 @@ const ROWS: &[(&str, &str)] = &[
     ("F5  /  Ctrl+Enter", "run query (selection or whole buffer)"),
     (
         "Ctrl+E",
-        "export current result set  (path ext: .csv / .jsonl / .json)",
+        "export result set  (ext: .csv / .jsonl / .json / .sql)",
     ),
     ("", ""),
     ("Connect dialog", ""),

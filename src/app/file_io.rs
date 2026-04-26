@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::App;
 use crate::ui::file_prompt::{self, FilePromptMode, FilePromptState};
-use crate::ui::{csv_export, json_export};
+use crate::ui::{csv_export, json_export, sql_export};
 
 impl App {
     /// Opens the inline filename prompt for the given mode. Closes any
@@ -109,12 +109,14 @@ impl App {
             return;
         };
         // Format follows the file extension. CSV is the default for
-        // anything we don't recognize.
+        // anything we don't recognize. SQL targets the `file_stem`
+        // (e.g. `public.users.sql` → `INSERT INTO public.users …`).
         let format = ExportFormat::from_path(path);
-        let res = std::fs::File::create(path).and_then(|mut f| match format {
+        let res = std::fs::File::create(path).and_then(|mut f| match &format {
             ExportFormat::Csv => csv_export::write_csv(rs, &mut f),
             ExportFormat::JsonLines => json_export::write_json_lines(rs, &mut f),
             ExportFormat::JsonPretty => json_export::write_json_pretty(rs, &mut f),
+            ExportFormat::SqlInsert { target } => sql_export::write_inserts(rs, target, &mut f),
         });
         match res {
             Ok(()) => self.toast_info(format!(
@@ -129,11 +131,12 @@ impl App {
 }
 
 /// Output format chosen from the export-path's extension.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 enum ExportFormat {
     Csv,
     JsonLines,
     JsonPretty,
+    SqlInsert { target: String },
 }
 
 impl ExportFormat {
@@ -145,15 +148,25 @@ impl ExportFormat {
         match ext.as_deref() {
             Some("jsonl") | Some("ndjson") => Self::JsonLines,
             Some("json") => Self::JsonPretty,
+            Some("sql") => {
+                let target = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("exported_rows")
+                    .to_string();
+                Self::SqlInsert { target }
+            }
             _ => Self::Csv,
         }
     }
 
-    fn label(self) -> &'static str {
+    fn label(&self) -> String {
         match self {
-            Self::Csv => "csv",
-            Self::JsonLines => "jsonl",
-            Self::JsonPretty => "json",
+            Self::Csv => "csv".into(),
+            Self::JsonLines => "jsonl".into(),
+            Self::JsonPretty => "json".into(),
+            Self::SqlInsert { target } => format!("sql → {target}"),
         }
     }
 }

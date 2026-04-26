@@ -12,6 +12,7 @@ pub mod json_export;
 pub mod results;
 pub mod row_detail;
 pub mod schema_tree;
+pub mod sql_export;
 pub mod sql_lexer;
 pub mod status;
 
