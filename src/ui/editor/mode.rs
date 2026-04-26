@@ -1,8 +1,9 @@
 //! Editor mode for vim-flavored modal editing.
 //!
-//! Two modes for v0.5.0 R2 — `Insert` (default, behaves like the
-//! pre-modal editor) and `Normal` (motions / mode-entry primitives).
-//! Visual / Command land in later rounds.
+//! `Insert` is the default (pre-modal-editor behavior). `Normal` and
+//! `Visual` follow vim conventions; Command mode lands in R6.
+
+use super::buffer::Cursor;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Mode {
@@ -14,6 +15,10 @@ pub enum Mode {
     /// Motion / command mode — keys are interpreted as commands rather
     /// than literal input.
     Normal,
+    /// Selection-extend mode. `anchor` records the cursor position at
+    /// the moment Visual was entered; the live selection always runs
+    /// between `anchor` and the current cursor.
+    Visual { anchor: Cursor },
 }
 
 impl Mode {
@@ -21,6 +26,7 @@ impl Mode {
         match self {
             Self::Insert => "[INSERT]",
             Self::Normal => "[NORMAL]",
+            Self::Visual { .. } => "[VISUAL]",
         }
     }
 }
