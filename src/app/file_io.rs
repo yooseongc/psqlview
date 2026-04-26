@@ -1,8 +1,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::App;
-use crate::ui::csv_export;
 use crate::ui::file_prompt::{self, FilePromptMode, FilePromptState};
+use crate::ui::{csv_export, json_export};
 
 impl App {
     /// Opens the inline filename prompt for the given mode. Closes any
@@ -108,14 +108,52 @@ impl App {
             self.toast_error("no result set to export".into());
             return;
         };
-        let res = std::fs::File::create(path).and_then(|mut f| csv_export::write_csv(rs, &mut f));
+        // Format follows the file extension. CSV is the default for
+        // anything we don't recognize.
+        let format = ExportFormat::from_path(path);
+        let res = std::fs::File::create(path).and_then(|mut f| match format {
+            ExportFormat::Csv => csv_export::write_csv(rs, &mut f),
+            ExportFormat::JsonLines => json_export::write_json_lines(rs, &mut f),
+            ExportFormat::JsonPretty => json_export::write_json_pretty(rs, &mut f),
+        });
         match res {
             Ok(()) => self.toast_info(format!(
-                "exported {} rows to {}",
+                "exported {} rows to {} ({})",
                 rs.rows.len(),
-                path.display()
+                path.display(),
+                format.label(),
             )),
             Err(e) => self.toast_error(format!("export failed: {e}")),
+        }
+    }
+}
+
+/// Output format chosen from the export-path's extension.
+#[derive(Debug, Clone, Copy)]
+enum ExportFormat {
+    Csv,
+    JsonLines,
+    JsonPretty,
+}
+
+impl ExportFormat {
+    fn from_path(path: &std::path::Path) -> Self {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase);
+        match ext.as_deref() {
+            Some("jsonl") | Some("ndjson") => Self::JsonLines,
+            Some("json") => Self::JsonPretty,
+            _ => Self::Csv,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Csv => "csv",
+            Self::JsonLines => "jsonl",
+            Self::JsonPretty => "json",
         }
     }
 }

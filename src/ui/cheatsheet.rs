@@ -26,7 +26,10 @@ const ROWS: &[(&str, &str)] = &[
     ),
     ("Tab  /  Shift+Tab", "cycle focus (outside the editor)"),
     ("F5  /  Ctrl+Enter", "run query (selection or whole buffer)"),
-    ("Ctrl+E", "export current result set to CSV"),
+    (
+        "Ctrl+E",
+        "export current result set  (path ext: .csv / .jsonl / .json)",
+    ),
     ("", ""),
     ("Connect dialog", ""),
     ("Tab  /  arrows", "move between fields"),
