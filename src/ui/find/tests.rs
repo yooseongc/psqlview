@@ -186,3 +186,51 @@ fn ctrl_f_style_enter_keeps_overlay_open() {
     // advance() wraps from 0 back to 0 (only one match), JumpTo not Close.
     assert!(matches!(out, FindOutcome::JumpTo(_)));
 }
+
+#[test]
+fn vim_search_from_visual_records_pre_find_cursor() {
+    let s = FindState::new_vim_search_from_visual(false, Cursor::new(2, 5));
+    assert_eq!(s.pre_find_cursor, Some(Cursor::new(2, 5)));
+    // Anchor still set so recompute lands on the nearest match.
+    assert_eq!(s.anchor, Some(Cursor::new(2, 5)));
+    assert!(s.enter_closes);
+    assert!(!s.backward);
+}
+
+#[test]
+fn vim_search_from_visual_backward_records_direction() {
+    let s = FindState::new_vim_search_from_visual(true, Cursor::new(0, 0));
+    assert!(s.backward);
+    assert_eq!(s.pre_find_cursor, Some(Cursor::new(0, 0)));
+}
+
+#[test]
+fn vim_search_normal_path_leaves_pre_find_cursor_none() {
+    // Regression: only the Visual entry sets pre_find_cursor — the
+    // existing `new_vim_search` constructor must NOT, or every Esc
+    // would silently restore the cursor for Normal-mode users too.
+    let s = FindState::new_vim_search(false, Cursor::new(0, 0));
+    assert_eq!(s.pre_find_cursor, None);
+}
+
+#[test]
+fn vim_search_from_visual_typing_finds_nearest_match() {
+    // Sanity that the Visual variant participates in normal recompute.
+    let lines = vec!["alpha beta alpha".to_string()];
+    let mut s = FindState::new_vim_search_from_visual(false, Cursor::new(0, 7));
+    s.needle = "alpha".into();
+    s.recompute(&lines);
+    // Cursor is at col 7; nearest forward match starts at col 11.
+    assert_eq!(s.active_idx, Some(1));
+    assert_eq!(s.matches[1].0, Cursor::new(0, 11));
+}
+
+#[test]
+fn vim_search_from_visual_enter_closes_returns_jump_and_close() {
+    let lines = vec!["foo bar".to_string()];
+    let mut s = FindState::new_vim_search_from_visual(false, Cursor::new(0, 0));
+    s.needle = "foo".into();
+    s.recompute(&lines);
+    let out = handle_key(&mut s, k(KeyCode::Enter, KeyModifiers::NONE), &lines);
+    assert!(matches!(out, FindOutcome::JumpAndClose(_)));
+}

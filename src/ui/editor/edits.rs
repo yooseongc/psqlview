@@ -81,6 +81,13 @@ impl EditorState {
         self.buf.set_cursor(c.row, c.col);
     }
 
+    /// Jumps the caret to `c` while leaving any active selection
+    /// anchor in place. Used by Visual-mode `/` `?` `n` `N` so the
+    /// selection extends to the match instead of collapsing.
+    pub fn jump_caret_keep_selection(&mut self, c: Cursor) {
+        self.buf.set_cursor(c.row, c.col);
+    }
+
     /// Replaces the inclusive char range `[start, end)` with `text`.
     /// Single-line ranges only (the find needle is single-line, but
     /// the replacement itself may contain `\n`s — those split lines

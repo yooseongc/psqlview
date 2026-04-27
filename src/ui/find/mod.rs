@@ -61,6 +61,12 @@ pub struct FindState {
     /// the search direction relative to this anchor — matching
     /// vim's "search starts from cursor" behavior.
     pub anchor: Option<Cursor>,
+    /// Cursor position at the moment the overlay opened *from
+    /// Visual mode*. Two effects: (1) every match jump uses
+    /// `jump_caret_keep_selection` so the Visual selection extends
+    /// instead of collapsing, and (2) Esc restores the cursor here
+    /// so cancelling search doesn't leave the selection mid-flight.
+    pub pre_find_cursor: Option<Cursor>,
 }
 
 impl Default for FindState {
@@ -82,6 +88,7 @@ impl FindState {
             backward: false,
             enter_closes: false,
             anchor: None,
+            pre_find_cursor: None,
         }
     }
 
@@ -109,6 +116,20 @@ impl FindState {
             backward,
             enter_closes: true,
             anchor: Some(anchor),
+            ..Self::new()
+        }
+    }
+
+    /// Vim-style search opened from Visual mode. Behaves like
+    /// `new_vim_search` but also records `pre_find_cursor` so the
+    /// caller (a) keeps the active selection while jumping to
+    /// matches and (b) restores the cursor on Esc.
+    pub fn new_vim_search_from_visual(backward: bool, cursor: Cursor) -> Self {
+        Self {
+            backward,
+            enter_closes: true,
+            anchor: Some(cursor),
+            pre_find_cursor: Some(cursor),
             ..Self::new()
         }
     }

@@ -18,17 +18,32 @@ impl App {
             Some(s) => find::handle_key(s, key, &lines),
             None => return,
         };
+        // When the overlay was opened from Visual mode, every cursor
+        // jump must preserve the selection anchor. The pre_find_cursor
+        // also drives Esc cursor-restore.
+        let from_visual = self.find.as_ref().and_then(|s| s.pre_find_cursor).is_some();
         match outcome {
             FindOutcome::Stay => {}
             FindOutcome::Cancel => {
+                if let Some(restore) = self.find.as_ref().and_then(|s| s.pre_find_cursor) {
+                    self.editor_mut().jump_caret_keep_selection(restore);
+                }
                 self.close_find_and_stash_needle();
             }
             FindOutcome::JumpTo(c) => {
-                self.editor_mut().jump_caret(c);
+                if from_visual {
+                    self.editor_mut().jump_caret_keep_selection(c);
+                } else {
+                    self.editor_mut().jump_caret(c);
+                }
             }
             FindOutcome::JumpAndClose(c) => {
                 self.close_find_and_stash_needle();
-                self.editor_mut().jump_caret(c);
+                if from_visual {
+                    self.editor_mut().jump_caret_keep_selection(c);
+                } else {
+                    self.editor_mut().jump_caret(c);
+                }
             }
             FindOutcome::ReplaceOne {
                 range: (start, end),
@@ -90,10 +105,25 @@ impl App {
         self.autocomplete = None;
     }
 
+    /// Vim `/` / `?` entry while in Visual mode. Same as
+    /// `open_vim_search` but tracks `pre_find_cursor` so:
+    /// - every match jump preserves the active selection
+    /// - Esc restores the cursor to its pre-search position
+    pub(super) fn open_vim_search_from_visual(&mut self, backward: bool) {
+        let (r, c) = self.editor().cursor_pos();
+        let cursor = Cursor::new(r, c);
+        let mut state = FindState::new_vim_search_from_visual(backward, cursor);
+        state.recompute(self.editor().lines());
+        self.find = Some(state);
+        self.autocomplete = None;
+    }
+
     /// Vim `n` (`reverse=false`) / `N` (`reverse=true`) repeat. Looks
     /// up the active tab's `last_search` + `last_search_backward`
     /// and jumps to the next/prev match strictly past the cursor.
-    /// Toasts when no last search or no match is found.
+    /// Toasts when no last search or no match is found. In Visual
+    /// mode the jump preserves the selection anchor so `n` extends
+    /// the selection to the next match.
     pub(super) fn repeat_vim_search(&mut self, reverse: bool) {
         let active = self.tabs.active();
         let Some(needle) = active.last_search.clone() else {
@@ -126,7 +156,12 @@ impl App {
                 .map(|(s, _)| *s)
         };
         if let Some(c) = target {
-            self.editor_mut().jump_caret(c);
+            let in_visual = matches!(self.editor().mode(), crate::ui::editor::mode::Mode::Visual);
+            if in_visual {
+                self.editor_mut().jump_caret_keep_selection(c);
+            } else {
+                self.editor_mut().jump_caret(c);
+            }
         }
     }
 }

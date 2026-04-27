@@ -164,38 +164,50 @@ impl App {
             }
         }
 
-        // Vim-style search + `:` command line — only meaningful
-        // when the editor pane is focused and the editor is in
-        // Normal mode. The cheatsheet `?` shortcut is already gated
-        // off for editor-focused workspace, so `?` here doesn't
-        // clash.
+        // Vim-style search + `:` command line. `/` `?` `n` `N` work
+        // in both Normal and Visual mode — Visual variants preserve
+        // the selection anchor so the selection extends to the
+        // match. `:` only opens in Normal mode (in Visual it would
+        // collide with the operator path).
         if self.focus == FocusPane::Editor
-            && matches!(self.editor().mode(), Mode::Normal)
             && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
         {
-            match key.code {
-                KeyCode::Char('/') if key.modifiers.is_empty() => {
-                    self.open_vim_search(false);
-                    return;
+            let mode = self.editor().mode();
+            let in_normal = matches!(mode, Mode::Normal);
+            let in_visual = matches!(mode, Mode::Visual);
+            if in_normal || in_visual {
+                match key.code {
+                    KeyCode::Char('/') if key.modifiers.is_empty() => {
+                        if in_visual {
+                            self.open_vim_search_from_visual(false);
+                        } else {
+                            self.open_vim_search(false);
+                        }
+                        return;
+                    }
+                    KeyCode::Char('?') => {
+                        if in_visual {
+                            self.open_vim_search_from_visual(true);
+                        } else {
+                            self.open_vim_search(true);
+                        }
+                        return;
+                    }
+                    KeyCode::Char('n') if key.modifiers.is_empty() => {
+                        self.repeat_vim_search(false);
+                        return;
+                    }
+                    KeyCode::Char('N') if key.modifiers == KeyModifiers::SHIFT => {
+                        self.repeat_vim_search(true);
+                        return;
+                    }
+                    KeyCode::Char(':') if in_normal => {
+                        self.command_line = Some(CommandLineState::new());
+                        self.autocomplete = None;
+                        return;
+                    }
+                    _ => {}
                 }
-                KeyCode::Char('?') => {
-                    self.open_vim_search(true);
-                    return;
-                }
-                KeyCode::Char('n') if key.modifiers.is_empty() => {
-                    self.repeat_vim_search(false);
-                    return;
-                }
-                KeyCode::Char('N') if key.modifiers == KeyModifiers::SHIFT => {
-                    self.repeat_vim_search(true);
-                    return;
-                }
-                KeyCode::Char(':') => {
-                    self.command_line = Some(CommandLineState::new());
-                    self.autocomplete = None;
-                    return;
-                }
-                _ => {}
             }
         }
 
