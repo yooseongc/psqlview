@@ -237,21 +237,60 @@ top-level `App` never touches the ratatui widgets directly.
   Open normalizes CRLF → LF; Save writes the buffer verbatim. I/O is
   synchronous (small SQL files); errors surface as toasts and leave
   the editor buffer unchanged.
+- `path_hint.rs` (`DirHint` + `draw_above_prompt`) is the directory
+  listing dropdown shown above `file_prompt` and the `:` command
+  line when the user is typing a path. Re-reads `std::fs::read_dir`
+  on every keystroke (no caching), filters by basename prefix,
+  hides dotfiles unless prefix starts with `.`, sorts directories
+  first then alphabetical. `Up` / `Down` select, `Tab` commits the
+  selection (or falls back to LCP `path_complete` when nothing is
+  selected — file_prompt only).
+- `substitute_confirm.rs` (`SubstituteState`) is the modal for
+  `:s/.../c`. Uses a cursor-walk model — `from` cursor walks past
+  each replacement so the next match is found *after* the inserted
+  text, never re-finding the replacement itself.
+- `cell_edit.rs` (`CellEditState`) is the inline cell-edit input
+  box. Opened only when the current `ResultSet` carries a
+  `RelationRef` source (set by tree-preview path) and the table has
+  a single-column PK. Pre-populates input with the original
+  `CellValue::to_string()`; `Ctrl+U` clears (→ NULL).
+- `confirm_update.rs` (`ConfirmUpdateState`) is the centred modal
+  showing the generated `UPDATE` SQL and asking `y/n`. The SQL is
+  built by `sql_format::format_update_one` and is what gets sent
+  to the server verbatim — what you see is what runs.
+- `sql_format.rs` is the shared module for SQL value / identifier
+  quoting and the user-input → CellValue parser. Both
+  `sql_export::write_inserts` (INSERT) and
+  `cell_edit`/`confirm_update` (UPDATE) use it so the quoting rules
+  are guaranteed identical across both surfaces.
 
 Modal layering (highest priority first, all checked in
 `App::on_key`):
 1. Quit (`Ctrl+Q` / `Ctrl+C`) — always wins.
 2. `file_prompt` — Ctrl+O / Ctrl+S / Ctrl+E inline prompt; absorbs
-   every key (even F-keys) until Enter / Esc.
+   every key (even F-keys) until Enter / Esc. Carries a live
+   `path_hint::DirHint` dropdown (Up/Down select, Tab commits).
 3. `command_line` — `:` ex prompt. Single-line, absorbs every key.
-4. `cheatsheet.open` — `F1` / `?` overlay; routes Up/Down/PageUp/
+   Carries the same `DirHint` dropdown when the input is in
+   `e <path>` / `w <path>` form.
+4. `confirm_update` — UPDATE confirm modal (y/n/Esc). Outranks the
+   cell edit so a dispatched confirm can't be re-opened.
+5. `cell_edit` — Cell-edit input box (Enter / Esc / Backspace /
+   printable / Ctrl+U). Opened by `e` on Results; only fires when
+   the result has a `RelationRef` source and a single-PK table.
+6. `subst_confirm` — `:s/.../c` interactive substitute confirm
+   (y/n/a/q + Esc). Sits above `find` so Ctrl+F can't hijack.
+7. `cheatsheet.open` — `F1` / `?` overlay; routes Up/Down/PageUp/
    PageDown into scroll position and Esc/Enter/?/q to close.
-5. `row_detail.open` — full-row modal (Enter on Results).
-6. `find.is_some()` — Ctrl+F / Ctrl+H / vim `/?` overlay.
-7. Autocomplete popup (while editor focused).
-8. Tree incremental search (`tree.search.is_some()` while focused).
-9. Running query (Esc → cancel only).
-10. Pane-specific handler. Inside the editor pane the dispatcher
+8. `row_detail.open` — full-row modal (Enter on Results).
+9. `find.is_some()` — Ctrl+F / Ctrl+H / vim `/?` overlay. When the
+   overlay carries `pre_find_cursor` (set by Visual-mode entry),
+   every match jump uses `jump_caret_keep_selection` and Esc
+   restores cursor to the pre-search position.
+10. Autocomplete popup (while editor focused).
+11. Tree incremental search (`tree.search.is_some()` while focused).
+12. Running query (Esc → cancel only).
+13. Pane-specific handler. Inside the editor pane the dispatcher
     branches further on `editor.mode()`.
 
 Keybinding quick-ref (workspace). The full list lives in
@@ -272,20 +311,26 @@ Keybinding quick-ref (workspace). The full list lives in
   operators `d y c x s` + `dd yy cc` linewise · text objects
   `iw aw iW aW i" a" i' a' i( a(` · `p`/`P` paste ·
   `/`/`?`/`n`/`N` search · `:` open command line
+- Editor (Visual): `/`/`?`/`n`/`N` extend selection to match
+  (cursor only; selection_anchor preserved). Esc on `/` restores
+  cursor to its pre-search position.
 - Editor tabs (any mode): `Ctrl+T` new · `Ctrl+W` close (twice within
   3s if dirty) · `Ctrl+]`/`Ctrl+[` (or `Ctrl+PageDown`/`Up`) cycle ·
   `Ctrl+1..9` jump to tab N
-- `:` command line: `:N` goto line · `:s/pat/repl/[g]` /
-  `:%s/pat/repl/[g]` substitute · `:w [path]` save · `:e <path>`
-  open · `:tabnew` / `:tabn` / `:tabp` / `:tabc` · `:q` quit ·
-  `:help` open cheatsheet
+- `:` command line: `:N` goto line · `:s/pat/repl/[gc]` /
+  `:%s/pat/repl/[gc]` substitute (`c` = interactive confirm) ·
+  `:w [path]` save · `:e <path>` open (both prompts get the
+  Up/Down + Tab path-hint dropdown) · `:tabnew` / `:tabn` / `:tabp`
+  / `:tabc` · `:q` quit · `:help` open cheatsheet
 - Tree: `/` incremental search · `n`/`N` repeat · `p` / `Space`
   preview rows of selected table · `D` show synthesized DDL
 - Results: `Enter` row detail · `s` sort current column
   (Asc→Desc→off) · `Ctrl+Left`/`Ctrl+Right` first/last column ·
   `y` / `Y` copy cell / row (OSC 52 clipboard) · `R` re-run last
-  query
+  query · `e` cell edit (tree-preview results, single-PK tables)
 - Workspace-wide: `Ctrl+E` export current result set to CSV
+- Status bar TX badge: `[TX]` (yellow) inside `BEGIN`, `[TX!]`
+  (red) when the transaction is in error
 - `Ctrl+Q` / `Ctrl+C` quit. `F10` is NOT bound.
 
 ## Conventions

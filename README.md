@@ -78,6 +78,16 @@ x86_64.
   prompt anchored to the bottom of the editor pane. Paths are
   cwd-relative; absolute paths pass through; CRLF is normalized to LF
   on open.
+- **Directory hint dropdown**: as you type a path the prompt shows the
+  parent directory live (no caching, dotfiles only when prefix starts
+  with `.`); `Up` / `Down` select; `Tab` commits selection. Same hint
+  surfaces above the `:e` / `:w` argument inside the `:` command line.
+- **Visual-mode search**: `/` `?` `n` `N` while in Visual mode move the
+  cursor to the match while keeping the selection anchor — selection
+  extends to the match. `Esc` restores the cursor to its pre-search
+  position.
+- **Interactive substitute confirm**: `:s/foo/bar/c` (or `:%s/.../gc`)
+  walks each match and prompts `(y)es / (n)o / (a)ll-rest / (q)uit`.
 - On a query error with a reported POSITION, the caret jumps to the
   offending character.
 
@@ -101,11 +111,20 @@ x86_64.
   native clipboard library is linked.
 - **Re-run** (`R`): re-issues the last query, or refreshes the DDL
   view via the catalog when the last "query" was a `D` shortcut.
+- **In-place cell edit** (`e`): on a tree-preview result with a
+  single-PK table, opens an inline edit box. Enter parses the new
+  value against the original cell type and shows the generated
+  `UPDATE "schema"."table" SET "col" = <val> WHERE "pk" = <v>;`
+  in a confirm modal — `y` executes, `n` cancels. The cell is patched
+  in-place once the server confirms success.
 - Cap at 10 000 rows with a `(truncated)` indicator.
 
 ### Other
 
 - **Cancel long-running queries with `Esc`** (libpq-style `cancel_query`).
+- **Transaction status badge**: the status bar shows `[TX]` (yellow)
+  when you're inside an explicit `BEGIN` block, `[TX!]` (red) when the
+  transaction has errored — a visible nudge to `ROLLBACK` and recover.
 - **Mouse**: click to focus, wheel to scroll, bracketed-paste support.
   Hold Shift while dragging to bypass mouse capture for native text
   selection.
@@ -128,7 +147,7 @@ editor) to open a scrollable cheatsheet. Highlights:
 | Editor (any mode) | `F5` / `Ctrl+Enter` | Run query (selection or whole buffer) |
 | Editor (any mode) | `Ctrl+Z` / `Ctrl+Y` | Undo / redo |
 | Editor (any mode) | `Ctrl+Up` / `Ctrl+Down` | Recall previous / next query |
-| Editor (any mode) | `Ctrl+O` / `Ctrl+S` | Open / save file (cwd-relative path) |
+| Editor (any mode) | `Ctrl+O` / `Ctrl+S` | Open / save file (Up/Down browse cwd, Tab commit) |
 | Editor (any mode) | `Ctrl+T` / `Ctrl+W` | New tab / close tab (twice in 3 s if dirty) |
 | Editor (any mode) | `Ctrl+]` / `Ctrl+[` | Next / previous tab |
 | Editor (any mode) | `Ctrl+1` .. `Ctrl+9` | Jump to tab N |
@@ -141,9 +160,11 @@ editor) to open a scrollable cheatsheet. Highlights:
 | Editor (Normal) | `h j k l  w b e  0 ^ $  gg G  %` | Vim motions (count prefix supported) |
 | Editor (Normal) | `d y c  dd yy cc  x  p P` | Operators + paste |
 | Editor (Normal) | `iw aw  iW aW  i" a"  i( a(` | Text objects |
-| Editor (Normal) | `/pat<Enter>` / `?pat<Enter>` | Forward / backward search |
-| Editor (Normal) | `n` / `N` | Repeat last search (same / reverse direction) |
+| Editor (Normal/Visual) | `/pat<Enter>` / `?pat<Enter>` | Forward / backward search (Visual extends selection) |
+| Editor (Normal/Visual) | `n` / `N` | Repeat last search (Visual extends selection) |
 | Editor (Normal) | `:` (or `Ctrl+G`) | Open `:` command line |
+| `:` command line | `:s/.../c` (or `gc`) | Interactive substitute confirm: `y` `n` `a` `q` |
+| `:` command line | `:e` / `:w` `<path>` | Up/Down browse cwd; Tab commit |
 | Editor (Insert fallback) | `Ctrl+F` / `Ctrl+H` | Incremental find / find-and-replace |
 | Schema tree | `j k` / arrows | Move |
 | Schema tree | `PageUp` / `PageDown` | Page (screenful) |
@@ -161,6 +182,7 @@ editor) to open a scrollable cheatsheet. Highlights:
 | Results | `s` | Sort current column (Asc → Desc → off) |
 | Results | `y` / `Y` | Copy current cell / row to clipboard (OSC 52) |
 | Results | `R` | Re-run last query (or refresh DDL view) |
+| Results | `e` | Edit cell (tree-preview results, single-PK tables) |
 | Results | `Enter` | Open row detail modal |
 | Connect | `Tab` / arrows | Move between fields |
 | Connect | `Enter` (last field) / `Ctrl+Enter` | Submit |
