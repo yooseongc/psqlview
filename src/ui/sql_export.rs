@@ -23,17 +23,18 @@
 
 use std::io::{self, Write};
 
-use crate::types::{CellValue, ResultSet};
+use super::sql_format::{format_value, quote_dotted, quote_ident};
+use crate::types::ResultSet;
 
 /// Writes `rs` as one `INSERT INTO target (...) VALUES (...);` per
 /// row.
 pub fn write_inserts<W: Write>(rs: &ResultSet, target: &str, w: &mut W) -> io::Result<()> {
-    let target_quoted = quote_target(target);
+    let target_quoted = quote_dotted(target);
     let cols_quoted: Vec<String> = rs.columns.iter().map(|c| quote_ident(&c.name)).collect();
     let cols_clause = cols_quoted.join(", ");
 
     for row in &rs.rows {
-        let values: Vec<String> = row.iter().map(format_cell).collect();
+        let values: Vec<String> = row.iter().map(format_value).collect();
         let values_clause = values.join(", ");
         writeln!(
             w,
@@ -43,50 +44,10 @@ pub fn write_inserts<W: Write>(rs: &ResultSet, target: &str, w: &mut W) -> io::R
     Ok(())
 }
 
-fn quote_target(target: &str) -> String {
-    target
-        .split('.')
-        .map(quote_ident)
-        .collect::<Vec<_>>()
-        .join(".")
-}
-
-fn quote_ident(name: &str) -> String {
-    let escaped = name.replace('"', "\"\"");
-    format!("\"{escaped}\"")
-}
-
-fn quote_string(s: &str) -> String {
-    let escaped = s.replace('\'', "''");
-    format!("'{escaped}'")
-}
-
-fn format_cell(v: &CellValue) -> String {
-    match v {
-        CellValue::Null => "NULL".into(),
-        CellValue::Bool(true) => "TRUE".into(),
-        CellValue::Bool(false) => "FALSE".into(),
-        CellValue::Int(n) => n.to_string(),
-        CellValue::Float(f) if f.is_finite() => format!("{}", f),
-        CellValue::Float(_) => "NULL".into(),
-        CellValue::Numeric(n) => n.to_string(),
-        CellValue::Text(s) => quote_string(s),
-        CellValue::Date(d) => quote_string(&d.to_string()),
-        CellValue::Time(t) => quote_string(&t.to_string()),
-        CellValue::Timestamp(t) => quote_string(&t.to_string()),
-        CellValue::TimestampTz(t) => quote_string(&t.format("%Y-%m-%d %H:%M:%S%.f%:z").to_string()),
-        CellValue::Json(s) => quote_string(s),
-        // No raw bytes available — emitting a placeholder would
-        // produce wrong data. NULL is the safe choice.
-        CellValue::Bytes(_) => "NULL".into(),
-        CellValue::Unsupported(_) => "NULL".into(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ColumnMeta;
+    use crate::types::{CellValue, ColumnMeta};
 
     fn col(name: &str) -> ColumnMeta {
         ColumnMeta {

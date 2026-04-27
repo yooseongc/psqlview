@@ -50,6 +50,33 @@ pub struct Column {
     pub default: Option<String>,
 }
 
+/// Returns the primary-key column names of `schema.table` in their
+/// constraint ordinal order. Empty result means no PK is defined
+/// (heap-only table, view, materialized view, etc.). Used by the
+/// cell-edit eligibility check — only single-column PKs are accepted
+/// for inline UPDATE generation.
+pub async fn primary_key_columns(
+    client: &Client,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<String>, DbError> {
+    let rows = client
+        .query(
+            "SELECT kcu.column_name \
+             FROM information_schema.table_constraints tc \
+             JOIN information_schema.key_column_usage kcu \
+               ON tc.constraint_schema = kcu.constraint_schema \
+              AND tc.constraint_name = kcu.constraint_name \
+             WHERE tc.table_schema = $1 \
+               AND tc.table_name = $2 \
+               AND tc.constraint_type = 'PRIMARY KEY' \
+             ORDER BY kcu.ordinal_position",
+            &[&schema, &table],
+        )
+        .await?;
+    Ok(rows.into_iter().map(|r| r.get::<_, String>(0)).collect())
+}
+
 pub async fn list_databases(client: &Client) -> Result<Vec<String>, DbError> {
     let rows = client
         .query(

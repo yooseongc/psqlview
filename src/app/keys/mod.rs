@@ -3,6 +3,7 @@
 //! detail → F1/`?` → toast Esc → focus switches → screen-specific
 //! handler) and delegates pane logic to the sub-modules.
 
+mod cell_edit;
 mod cmdline;
 mod connect;
 mod find;
@@ -39,6 +40,19 @@ impl App {
             return;
         }
 
+        // UPDATE confirm modal — y/n + Esc. Highest of the cell-edit
+        // / confirm pair so the user can't accidentally re-open the
+        // edit while a confirm is on-screen.
+        if self.confirm_update.is_some() {
+            self.handle_confirm_update_key(key);
+            return;
+        }
+        // Cell-edit input box — absorbs printable / Backspace /
+        // Enter / Esc. Slotted before find so Ctrl+F can't hijack.
+        if self.cell_edit.is_some() {
+            self.handle_cell_edit_key(key);
+            return;
+        }
         // Substitute confirm modal — y/n/a/q + Esc. Slotted before
         // Find so Ctrl+F can't hijack a pending confirm.
         if self.subst_confirm.is_some() {

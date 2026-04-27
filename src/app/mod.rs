@@ -8,9 +8,12 @@ use tokio_postgres::CancelToken;
 use crate::db::catalog::RelationKind;
 use crate::db::{self, catalog, Session};
 use crate::event::AppEvent;
+use crate::types::CellValue;
 use crate::ui::autocomplete::AutocompletePopup;
+use crate::ui::cell_edit::CellEditState;
 use crate::ui::cheatsheet::CheatsheetState;
 use crate::ui::command_line::CommandLineState;
+use crate::ui::confirm_update::ConfirmUpdateState;
 use crate::ui::connect_dialog::ConnectDialogState;
 use crate::ui::editor::tab::{CloseOutcome, Tabs};
 use crate::ui::editor::EditorState;
@@ -21,6 +24,26 @@ use crate::ui::row_detail::RowDetailState;
 use crate::ui::schema_tree::SchemaTreeState;
 use crate::ui::substitute_confirm::SubstituteState;
 use crate::ui::PaneRects;
+
+/// Cell coordinates + new value to apply to the result set after the
+/// pending UPDATE confirms success. Lives on `App` so it survives the
+/// async round-trip without sharing state with the spawned task.
+#[derive(Debug)]
+pub struct PendingCellPatch {
+    pub row: usize,
+    pub col: usize,
+    pub new_value: CellValue,
+}
+
+/// Source-relation metadata staged before a tree-preview dispatch.
+/// `on_query_result` consumes it on success and stitches it onto the
+/// arriving `ResultSet` so the cell-edit modal knows what table /
+/// what PK to target.
+#[derive(Debug)]
+pub struct PreviewMeta {
+    pub source: crate::types::RelationRef,
+    pub pk_columns: Vec<String>,
+}
 
 mod autocomplete;
 mod clipboard;
@@ -128,6 +151,29 @@ pub struct App {
     /// pending confirm can't be hijacked by Ctrl+F.
     pub subst_confirm: Option<SubstituteState>,
 
+    /// Inline cell-edit modal — opened by `e` on the Results pane
+    /// when the current ResultSet was loaded via tree preview and the
+    /// table has a single PK. Absorbs printable / Backspace / Enter /
+    /// Esc.
+    pub cell_edit: Option<CellEditState>,
+
+    /// UPDATE confirm modal — opened from cell_edit on Enter (after
+    /// successful parse). Absorbs `y` / `n` / Esc. The SQL preview
+    /// here is exactly what gets sent to the server.
+    pub confirm_update: Option<ConfirmUpdateState>,
+
+    /// Cell patch staged after the user confirms a cell-edit UPDATE.
+    /// `on_query_result` consumes this on success — the cell value
+    /// gets replaced in-place so the user sees the new value
+    /// immediately without re-running the preview query.
+    pub pending_cell_patch: Option<PendingCellPatch>,
+
+    /// Source-relation metadata staged before a tree-preview
+    /// dispatch. `on_query_result` consumes this and stitches the
+    /// `RelationRef` + PK column list onto the arriving `ResultSet`
+    /// so the cell-edit modal knows the source.
+    pub pending_preview_meta: Option<PreviewMeta>,
+
     /// SQL of the most recently executed query. Retained so error renderers
     /// can place a caret at the reported POSITION.
     pub last_run_sql: Option<String>,
@@ -174,6 +220,10 @@ impl App {
             command_line: None,
             find: None,
             subst_confirm: None,
+            cell_edit: None,
+            confirm_update: None,
+            pending_cell_patch: None,
+            pending_preview_meta: None,
             last_run_sql: None,
             last_ddl_target: None,
             history: VecDeque::new(),

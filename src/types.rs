@@ -71,6 +71,15 @@ impl fmt::Display for CellValue {
     }
 }
 
+/// Identifies a relation by `schema.name`. Used to mark a `ResultSet`
+/// as having come from a known table so the cell-edit path can build
+/// a safe `UPDATE ... WHERE pk = …`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RelationRef {
+    pub schema: String,
+    pub name: String,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct ResultSet {
     pub columns: Vec<ColumnMeta>,
@@ -78,16 +87,22 @@ pub struct ResultSet {
     pub truncated_at: Option<usize>,
     pub command_tag: Option<String>,
     pub elapsed_ms: u128,
+    /// `Some` only when the result came from a tree preview — the
+    /// cell-edit modal uses this to scope itself to known tables.
+    /// Arbitrary user SELECTs leave this `None`.
+    pub source: Option<RelationRef>,
+    /// Primary-key column names of `source`, in ordinal order. Empty
+    /// when no PK or when source is None. Cell-edit only allows
+    /// single-column PKs (`len() == 1`).
+    pub pk_columns: Vec<String>,
 }
 
 impl ResultSet {
     pub fn empty_with_tag(tag: impl Into<String>, elapsed_ms: u128) -> Self {
         Self {
-            columns: Vec::new(),
-            rows: Vec::new(),
-            truncated_at: None,
             command_tag: Some(tag.into()),
             elapsed_ms,
+            ..Default::default()
         }
     }
 }

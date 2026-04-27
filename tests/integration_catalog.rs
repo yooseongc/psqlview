@@ -8,6 +8,36 @@ use psqlview::db::catalog::{self, RelationKind};
 
 #[tokio::test]
 #[ignore = "requires PSQLVIEW_PG_URL"]
+async fn primary_key_columns_returns_pk_for_single_pk_table() {
+    init_crypto();
+    if pg_url().is_none() {
+        return;
+    }
+    let (client, _handle) = connect_plain().await;
+    // psqlview_test.users has a single-column PK on `id`.
+    let pk = catalog::primary_key_columns(&client, "psqlview_test", "users")
+        .await
+        .expect("pk lookup");
+    assert_eq!(pk, vec!["id"], "users.id is the PK; got {pk:?}");
+}
+
+#[tokio::test]
+#[ignore = "requires PSQLVIEW_PG_URL"]
+async fn primary_key_columns_returns_empty_for_view() {
+    init_crypto();
+    if pg_url().is_none() {
+        return;
+    }
+    let (client, _handle) = connect_plain().await;
+    // Views don't have PKs.
+    let pk = catalog::primary_key_columns(&client, "psqlview_test", "paid_orders")
+        .await
+        .expect("pk lookup");
+    assert!(pk.is_empty(), "views have no PK; got {pk:?}");
+}
+
+#[tokio::test]
+#[ignore = "requires PSQLVIEW_PG_URL"]
 async fn list_schemas_excludes_system_schemas() {
     init_crypto();
     if pg_url().is_none() {

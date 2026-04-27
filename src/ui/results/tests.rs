@@ -26,9 +26,9 @@ fn sample_result() -> ResultSet {
             vec![CellValue::Int(2), CellValue::Text("y".into())],
             vec![CellValue::Int(3), CellValue::Text("z".into())],
         ],
-        truncated_at: None,
         command_tag: Some("3 rows".into()),
         elapsed_ms: 1,
+        ..Default::default()
     }
 }
 
@@ -127,9 +127,9 @@ fn result_with_rows(n: usize) -> ResultSet {
             type_name: "int4".into(),
         }],
         rows,
-        truncated_at: None,
         command_tag: Some(format!("{n} rows")),
         elapsed_ms: 1,
+        ..Default::default()
     }
 }
 
@@ -167,9 +167,9 @@ fn extract_explain_detects_query_plan_column() {
             )],
             vec![CellValue::Text("Planning Time: 0.1 ms".into())],
         ],
-        truncated_at: None,
         command_tag: Some("2 rows".into()),
         elapsed_ms: 1,
+        ..Default::default()
     };
     let mut s = ResultsState::default();
     s.set_result(set);

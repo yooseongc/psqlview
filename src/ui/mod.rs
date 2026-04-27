@@ -1,8 +1,10 @@
 pub mod autocomplete;
 pub mod autocomplete_context;
+pub mod cell_edit;
 pub mod cheatsheet;
 pub mod clipboard;
 pub mod command_line;
+pub mod confirm_update;
 pub mod connect_dialog;
 pub mod csv_export;
 pub mod editor;
@@ -14,6 +16,7 @@ pub mod results;
 pub mod row_detail;
 pub mod schema_tree;
 pub mod sql_export;
+pub mod sql_format;
 pub mod sql_lexer;
 pub mod status;
 pub mod substitute_confirm;
@@ -160,6 +163,12 @@ fn draw_workspace(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
     if let Some(state) = &app.subst_confirm {
         substitute_confirm::draw(frame, state, editor_rect);
+    }
+    if let Some(state) = &app.cell_edit {
+        cell_edit::draw(frame, state, editor_rect);
+    }
+    if let Some(state) = &app.confirm_update {
+        confirm_update::draw(frame, state, area);
     }
     if let Some(state) = &app.find {
         find::draw(frame, state, editor_rect);

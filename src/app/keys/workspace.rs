@@ -279,6 +279,15 @@ impl App {
                         self.rerun_last_query();
                         return;
                     }
+                    // `e` opens the cell-edit modal — only does
+                    // anything when the result came from tree
+                    // preview and the table has a single PK; the
+                    // eligibility check toasts the specific reason
+                    // on failure.
+                    if key.modifiers.is_empty() && matches!(key.code, KeyCode::Char('e')) {
+                        self.try_open_cell_edit();
+                        return;
+                    }
                     // Enter on a populated result opens the per-row
                     // detail modal, bypassing the Results handler.
                     if matches!(key.code, KeyCode::Enter)

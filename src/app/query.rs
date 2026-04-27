@@ -43,9 +43,8 @@ pub(super) fn ddl_to_resultset(text: &str, elapsed_ms: u128) -> ResultSet {
             type_name: "text".into(),
         }],
         rows,
-        truncated_at: None,
-        command_tag: None,
         elapsed_ms,
+        ..Default::default()
     }
 }
 
@@ -85,7 +84,7 @@ impl App {
     /// No-op when there is no live session. Used by `run_current_query`,
     /// the tree-preview shortcut, and any other shortcut that wants to
     /// run a synthesized query without touching the editor.
-    fn dispatch_sql(&mut self, sql: String) {
+    pub(super) fn dispatch_sql(&mut self, sql: String) {
         let (client, cancel) = match self.session.as_ref() {
             Some(s) => (s.client(), s.cancel_token()),
             None => return,
@@ -114,15 +113,65 @@ impl App {
     /// Builds a `SELECT * FROM "schema"."relation" LIMIT N` query and
     /// dispatches it. Identifier quoting protects against schemas /
     /// relation names containing special chars or reserved words.
+    /// Also stages `PreviewMeta` (source + PK columns) so the
+    /// arriving `ResultSet` carries the info the cell-edit modal
+    /// needs to scope itself.
     pub(super) fn run_preview_for_selected_relation(&mut self) {
         let Some(node) = self.tree.current_node() else {
             return;
         };
-        if let crate::ui::schema_tree::NodeRef::Relation { schema, name, .. } = node {
-            let sql = build_preview_sql(&schema, &name, PREVIEW_ROW_LIMIT);
-            self.toast_info(format!("preview: {schema}.{name}"));
-            self.dispatch_sql(sql);
-        }
+        let crate::ui::schema_tree::NodeRef::Relation { schema, name, .. } = node else {
+            return;
+        };
+        let sql = build_preview_sql(&schema, &name, PREVIEW_ROW_LIMIT);
+        self.toast_info(format!("preview: {schema}.{name}"));
+        self.stage_preview_meta(schema, name);
+        self.dispatch_sql(sql);
+    }
+
+    /// Spawns a quick PK-column fetch and stashes the source +
+    /// (synchronously empty initially) PK list onto
+    /// `pending_preview_meta`. The PK list is filled in via a
+    /// dedicated `AppEvent::PkColumnsLoaded` event so the dispatch
+    /// path stays non-blocking. If the PK fetch loses the race with
+    /// the preview SELECT (unlikely — same connection, sequential
+    /// completion), the `pk_columns` will be empty and cell-edit
+    /// just toasts "no primary key" — recoverable.
+    fn stage_preview_meta(&mut self, schema: String, name: String) {
+        use crate::types::RelationRef;
+        let source = RelationRef {
+            schema: schema.clone(),
+            name: name.clone(),
+        };
+        // Best-effort synchronous PK fetch. Tree preview only fires
+        // on user input so the extra round-trip is fine. Done here so
+        // the `PreviewMeta` arrives complete on `on_query_result`.
+        let pk_columns = self.fetch_pk_columns_blocking(&schema, &name);
+        self.pending_preview_meta = Some(super::PreviewMeta { source, pk_columns });
+    }
+
+    /// Tiny tokio-runtime-block to fetch PK columns synchronously
+    /// before kicking off the preview SELECT. The query is cheap
+    /// (information_schema lookup, single round-trip) and keeping
+    /// it inline simplifies the event flow — no extra
+    /// `AppEvent::PkColumnsLoaded` plumbing.
+    fn fetch_pk_columns_blocking(&self, schema: &str, name: &str) -> Vec<String> {
+        let Some(session) = self.session.as_ref() else {
+            return Vec::new();
+        };
+        let client = session.client();
+        let schema = schema.to_string();
+        let name = name.to_string();
+        // tokio's `block_in_place` lets us await on the current
+        // worker without blocking the runtime. Falls back to empty
+        // on failure — the cell-edit modal handles that gracefully.
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async move {
+                catalog::primary_key_columns(&client, &schema, &name)
+                    .await
+                    .unwrap_or_default()
+            })
+        })
     }
 
     /// Fetches the DDL for the selected relation (CREATE TABLE for
@@ -192,10 +241,38 @@ impl App {
     pub(super) fn on_query_result(&mut self, r: Result<ResultSet, db::DbError>) {
         let sql = self.last_run_sql.clone().unwrap_or_default();
         match r {
-            Ok(set) => {
+            Ok(mut set) => {
                 self.query_status = QueryStatus::Done {
                     elapsed: Duration::from_millis(set.elapsed_ms as u64),
                 };
+                // If a cell-edit UPDATE was just confirmed, the
+                // server reply has no rows but we know the new value
+                // — patch the existing result-set in place rather
+                // than replacing it, so the user sees the edit
+                // without re-running the preview query.
+                if let Some(patch) = self.pending_cell_patch.take() {
+                    if let Some(rs) = self.results.current.as_mut() {
+                        if let Some(row) = rs.rows.get_mut(patch.row) {
+                            if let Some(cell) = row.get_mut(patch.col) {
+                                *cell = patch.new_value;
+                            }
+                        }
+                    }
+                    let tag = set.command_tag.clone().unwrap_or_default();
+                    self.toast_info(format!("update applied: {tag}"));
+                    // Don't replace the result pane with the empty
+                    // UPDATE response — keep the table view.
+                    self.update_tx_after_query(&sql, true);
+                    return;
+                }
+                // Fresh dispatch invalidates any stale source/pk on
+                // existing results (already cleared by the empty
+                // ResultSet's defaults). Tree-preview path overrides
+                // these in `dispatch_preview_with_source`.
+                if let Some(meta) = self.pending_preview_meta.take() {
+                    set.source = Some(meta.source);
+                    set.pk_columns = meta.pk_columns;
+                }
                 self.results.set_result(set);
                 self.update_tx_after_query(&sql, true);
             }
