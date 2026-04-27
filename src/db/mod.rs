@@ -140,11 +140,34 @@ fn format_pg_error(e: &tokio_postgres::Error) -> String {
     out
 }
 
+/// Session-local view of the server's transaction state.
+///
+/// Tracked locally by scanning the user-submitted SQL for transaction
+/// control keywords (BEGIN / COMMIT / END / ROLLBACK / ABORT) and
+/// combining with query success/failure. tokio-postgres does not
+/// expose the protocol-level ReadyForQuery indicator, and querying
+/// the server every round-trip would (a) cost an extra round-trip and
+/// (b) fail outright while in the InError state. Local tracking is
+/// pragmatic and matches the user's mental model: "I typed BEGIN, so
+/// I'm in a transaction".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TxStatus {
+    /// Auto-commit mode — every statement is its own transaction.
+    #[default]
+    Idle,
+    /// Inside an explicit transaction block.
+    Active,
+    /// Inside a transaction that has errored — only ROLLBACK / ABORT
+    /// will recover.
+    InError,
+}
+
 pub struct Session {
     pub(crate) client: Arc<Client>,
     pub(crate) cancel_token: CancelToken,
     pub server_version: ServerVersion,
     pub label: String,
+    pub tx: TxStatus,
 }
 
 impl Session {

@@ -285,3 +285,52 @@ async fn long_running_query_can_be_cancelled() {
         "cancel took too long: {elapsed:?}"
     );
 }
+
+/// Confirms the assumption baked into `compute_tx_transition`:
+/// (a) BEGIN succeeds, (b) a failing statement leaves the session in
+/// the error tx state — verified by the *next* query failing with
+/// SQLSTATE 25P02 (`in_failed_sql_transaction`), and (c) ROLLBACK
+/// recovers, after which a fresh statement succeeds. If this ever
+/// breaks, the local TxStatus state machine is out of sync with PG.
+#[tokio::test]
+#[ignore = "requires PSQLVIEW_PG_URL"]
+async fn transaction_error_state_recovers_via_rollback() {
+    init_crypto();
+    if pg_url().is_none() {
+        return;
+    }
+    let (client, _handle) = connect_plain().await;
+    let client = std::sync::Arc::new(client);
+
+    db::query::execute(client.clone(), "BEGIN")
+        .await
+        .expect("BEGIN succeeds");
+
+    // Predictable error inside the tx — references a missing table.
+    let err = db::query::execute(client.clone(), "SELECT * FROM no_such_table_xyz_42")
+        .await
+        .expect_err("missing table errors");
+    let detailed = err.format_detailed_with_sql("SELECT * FROM no_such_table_xyz_42");
+    assert!(detailed.contains("42P01"), "want 42P01: {detailed}");
+
+    // Server is now in InError tx — ANY statement except ROLLBACK must
+    // fail with 25P02. This is what makes the InError state observable
+    // and recoverable.
+    let err2 = db::query::execute(client.clone(), "SELECT 1")
+        .await
+        .expect_err("in-error tx blocks reads");
+    let detailed2 = err2.format_detailed_with_sql("SELECT 1");
+    assert!(
+        detailed2.contains("25P02"),
+        "want SQLSTATE 25P02 (in_failed_sql_transaction), got: {detailed2}"
+    );
+
+    db::query::execute(client.clone(), "ROLLBACK")
+        .await
+        .expect("ROLLBACK recovers");
+
+    // Sanity: fresh statement now works.
+    db::query::execute(client, "SELECT 1")
+        .await
+        .expect("post-rollback SELECT works");
+}

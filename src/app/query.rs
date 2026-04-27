@@ -2,7 +2,8 @@ use std::time::{Duration, Instant};
 
 use super::{App, FocusPane, QueryStatus};
 use crate::db::catalog::RelationKind;
-use crate::db::{self, catalog};
+use crate::db::query::TxAction;
+use crate::db::{self, catalog, TxStatus};
 use crate::event::AppEvent;
 use crate::types::ResultSet;
 
@@ -189,12 +190,14 @@ impl App {
     }
 
     pub(super) fn on_query_result(&mut self, r: Result<ResultSet, db::DbError>) {
+        let sql = self.last_run_sql.clone().unwrap_or_default();
         match r {
             Ok(set) => {
                 self.query_status = QueryStatus::Done {
                     elapsed: Duration::from_millis(set.elapsed_ms as u64),
                 };
                 self.results.set_result(set);
+                self.update_tx_after_query(&sql, true);
             }
             Err(db::DbError::Query(e))
                 if e.code() == Some(&tokio_postgres::error::SqlState::QUERY_CANCELED)
@@ -203,10 +206,15 @@ impl App {
                 self.query_status = QueryStatus::Cancelled;
                 self.results.clear();
                 self.toast_info("query cancelled".into());
+                // Cancellation doesn't itself change tx state — the
+                // statement was aborted on the wire, server may still
+                // be Active or have moved to InError. Treat as failure
+                // for tx purposes so an Active session goes InError
+                // (matches what the server will report on next query).
+                self.update_tx_after_query(&sql, false);
             }
             Err(err) => {
-                let sql = self.last_run_sql.as_deref().unwrap_or("");
-                let detailed = err.format_detailed_with_sql(sql);
+                let detailed = err.format_detailed_with_sql(&sql);
                 tracing::warn!(error = %detailed, "query failed");
                 // Jump the editor caret to the offending position so the
                 // user can start typing the fix without hunting for it.
@@ -216,7 +224,138 @@ impl App {
                 self.query_status = QueryStatus::Failed(detailed.clone());
                 self.results.clear();
                 self.toast_error(detailed);
+                self.update_tx_after_query(&sql, false);
             }
         }
+    }
+
+    /// Applies a `TxStatus` transition derived from the SQL keyword and
+    /// success outcome. Toasts on transitions so the user sees that
+    /// `BEGIN;` actually opened a transaction even when the result pane
+    /// is empty.
+    pub(super) fn update_tx_after_query(&mut self, sql: &str, ok: bool) {
+        let action = db::query::tx_action(sql);
+        let prev = match self.session.as_ref() {
+            Some(s) => s.tx,
+            None => return,
+        };
+        let new = compute_tx_transition(prev, action, ok);
+        if new == prev {
+            return;
+        }
+        if let Some(s) = self.session.as_mut() {
+            s.tx = new;
+        }
+        if let Some(msg) = transition_toast(prev, new) {
+            self.toast_info(msg.into());
+        }
+    }
+}
+
+/// Pure transition function — separated so it can be unit tested
+/// without spinning up a session or running real queries.
+pub(super) fn compute_tx_transition(
+    prev: TxStatus,
+    action: Option<TxAction>,
+    ok: bool,
+) -> TxStatus {
+    match (prev, action, ok) {
+        // Successful transitions driven by the keyword.
+        (TxStatus::Idle, Some(TxAction::Begin), true) => TxStatus::Active,
+        (TxStatus::Active, Some(TxAction::Commit), true) => TxStatus::Idle,
+        (TxStatus::Active, Some(TxAction::Rollback), true) => TxStatus::Idle,
+        (TxStatus::InError, Some(TxAction::Rollback), true) => TxStatus::Idle,
+        (TxStatus::InError, Some(TxAction::Commit), true) => TxStatus::Idle,
+        // Failure inside an active tx flips to InError. Failures in Idle
+        // stay Idle (stand-alone statements don't open a tx).
+        (TxStatus::Active, _, false) => TxStatus::InError,
+        // Anything else: hold the previous state.
+        _ => prev,
+    }
+}
+
+pub(super) fn transition_toast(prev: TxStatus, new: TxStatus) -> Option<&'static str> {
+    match (prev, new) {
+        (TxStatus::Idle, TxStatus::Active) => Some("transaction started"),
+        (TxStatus::Active, TxStatus::Idle) => Some("transaction ended"),
+        (TxStatus::Active, TxStatus::InError) => {
+            Some("transaction in error \u{2014} ROLLBACK to recover")
+        }
+        (TxStatus::InError, TxStatus::Idle) => Some("transaction recovered"),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn idle_plus_begin_success_becomes_active() {
+        assert_eq!(
+            compute_tx_transition(TxStatus::Idle, Some(TxAction::Begin), true),
+            TxStatus::Active
+        );
+    }
+
+    #[test]
+    fn active_plus_commit_or_rollback_success_returns_to_idle() {
+        assert_eq!(
+            compute_tx_transition(TxStatus::Active, Some(TxAction::Commit), true),
+            TxStatus::Idle
+        );
+        assert_eq!(
+            compute_tx_transition(TxStatus::Active, Some(TxAction::Rollback), true),
+            TxStatus::Idle
+        );
+    }
+
+    #[test]
+    fn active_plus_any_failure_flips_to_in_error() {
+        assert_eq!(
+            compute_tx_transition(TxStatus::Active, None, false),
+            TxStatus::InError
+        );
+        // BEGIN failure mid-tx: still flips to InError.
+        assert_eq!(
+            compute_tx_transition(TxStatus::Active, Some(TxAction::Begin), false),
+            TxStatus::InError
+        );
+    }
+
+    #[test]
+    fn idle_plus_failure_stays_idle() {
+        // Stand-alone failing statement doesn't open a tx.
+        assert_eq!(
+            compute_tx_transition(TxStatus::Idle, None, false),
+            TxStatus::Idle
+        );
+    }
+
+    #[test]
+    fn in_error_plus_rollback_recovers_to_idle() {
+        assert_eq!(
+            compute_tx_transition(TxStatus::InError, Some(TxAction::Rollback), true),
+            TxStatus::Idle
+        );
+    }
+
+    #[test]
+    fn in_error_plus_any_failure_stays_in_error() {
+        assert_eq!(
+            compute_tx_transition(TxStatus::InError, None, false),
+            TxStatus::InError
+        );
+    }
+
+    #[test]
+    fn transition_toast_only_fires_on_real_change() {
+        // No-op transitions (Idle→Idle, Active→Active) silent.
+        assert_eq!(transition_toast(TxStatus::Idle, TxStatus::Idle), None);
+        // Real transitions emit a one-line toast.
+        assert!(transition_toast(TxStatus::Idle, TxStatus::Active).is_some());
+        assert!(transition_toast(TxStatus::Active, TxStatus::Idle).is_some());
+        assert!(transition_toast(TxStatus::Active, TxStatus::InError).is_some());
+        assert!(transition_toast(TxStatus::InError, TxStatus::Idle).is_some());
     }
 }

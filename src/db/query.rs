@@ -168,6 +168,45 @@ pub fn returns_rows(sql: &str) -> bool {
     )
 }
 
+/// Transaction-control action that the App layer applies to its
+/// `TxStatus` after a successful query. Determined by scanning the
+/// user-submitted SQL — no extra round-trip to the server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxAction {
+    Begin,
+    Commit,
+    Rollback,
+}
+
+/// Returns the *last* transaction-control keyword across all
+/// statements in `sql`. Caller applies the result if the query
+/// succeeded; on error we don't consult this (the App handles the
+/// Active → InError transition independently).
+///
+/// Splits on `;` naively — does not understand `;` inside string
+/// literals or block comments. Adequate for typical interactive
+/// SQL where tx-control statements stand alone.
+pub fn tx_action(sql: &str) -> Option<TxAction> {
+    let mut last: Option<TxAction> = None;
+    for stmt in sql.split(';') {
+        let stripped = strip_leading_noise(stmt);
+        let first_word: String = stripped
+            .chars()
+            .take_while(|c| c.is_ascii_alphabetic())
+            .collect();
+        let action = match first_word.to_ascii_uppercase().as_str() {
+            "BEGIN" | "START" => Some(TxAction::Begin),
+            "COMMIT" | "END" => Some(TxAction::Commit),
+            "ROLLBACK" | "ABORT" => Some(TxAction::Rollback),
+            _ => None,
+        };
+        if action.is_some() {
+            last = action;
+        }
+    }
+    last
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,5 +252,53 @@ mod tests {
         assert!(!returns_rows("deallocate all"));
         assert!(!returns_rows("copy t to stdout"));
         assert!(!returns_rows(""));
+    }
+
+    #[test]
+    fn tx_action_recognises_each_keyword_case_insensitively() {
+        assert_eq!(tx_action("BEGIN"), Some(TxAction::Begin));
+        assert_eq!(
+            tx_action("begin transaction read only"),
+            Some(TxAction::Begin)
+        );
+        assert_eq!(tx_action("START TRANSACTION"), Some(TxAction::Begin));
+        assert_eq!(tx_action("COMMIT"), Some(TxAction::Commit));
+        assert_eq!(tx_action("end"), Some(TxAction::Commit));
+        assert_eq!(tx_action("ROLLBACK"), Some(TxAction::Rollback));
+        assert_eq!(tx_action("abort"), Some(TxAction::Rollback));
+    }
+
+    #[test]
+    fn tx_action_returns_none_for_non_tx_statements() {
+        assert_eq!(tx_action("SELECT 1"), None);
+        assert_eq!(tx_action("INSERT INTO t VALUES (1)"), None);
+        assert_eq!(tx_action(""), None);
+        assert_eq!(tx_action("-- begin in a comment"), None);
+    }
+
+    #[test]
+    fn tx_action_returns_last_keyword_across_multiple_statements() {
+        // The user typed the whole BEGIN/SELECT/COMMIT block in one
+        // F5 — net state should be Idle (last keyword = COMMIT).
+        assert_eq!(
+            tx_action("BEGIN; SELECT 1; COMMIT;"),
+            Some(TxAction::Commit)
+        );
+        // Rollback within a sequence wins as the final action.
+        assert_eq!(
+            tx_action("BEGIN; INSERT INTO t VALUES (1); ROLLBACK"),
+            Some(TxAction::Rollback)
+        );
+        // A trailing BEGIN after a Rollback should still be Begin.
+        assert_eq!(tx_action("ROLLBACK; BEGIN"), Some(TxAction::Begin));
+    }
+
+    #[test]
+    fn tx_action_skips_leading_comments_per_statement() {
+        assert_eq!(tx_action("-- starting tx\nBEGIN"), Some(TxAction::Begin));
+        assert_eq!(
+            tx_action("/* setup */ BEGIN; SELECT 1; /* done */ COMMIT;"),
+            Some(TxAction::Commit)
+        );
     }
 }

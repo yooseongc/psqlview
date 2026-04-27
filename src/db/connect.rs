@@ -7,7 +7,7 @@ use tokio_postgres::{config::SslMode as PgSslMode, Config};
 use crate::config::ConnInfo;
 use crate::types::{ServerVersion, SslMode};
 
-use super::{DbError, Session};
+use super::{DbError, Session, TxStatus};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -55,6 +55,7 @@ pub async fn connect(info: &ConnInfo) -> Result<Session, DbError> {
         cancel_token,
         server_version,
         label,
+        tx: TxStatus::Idle,
     })
 }
 
