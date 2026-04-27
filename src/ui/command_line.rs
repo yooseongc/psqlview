@@ -147,6 +147,9 @@ pub enum Command {
         pattern: String,
         replacement: String,
         global: bool,
+        /// `c` flag — interactive per-match confirm. App opens the
+        /// substitute confirm modal instead of replacing inline.
+        confirm: bool,
     },
     /// `:w` (no path → save in place if known, else open Save prompt)
     /// or `:w foo.sql` (save to argument).
@@ -185,6 +188,7 @@ pub fn parse(input: &str) -> Result<Command, String> {
             pattern,
             replacement,
             global: flags.contains('g'),
+            confirm: flags.contains('c'),
         });
     }
     if let Some(rest) = trimmed.strip_prefix("s/") {
@@ -194,6 +198,7 @@ pub fn parse(input: &str) -> Result<Command, String> {
             pattern,
             replacement,
             global: flags.contains('g'),
+            confirm: flags.contains('c'),
         });
     }
 
@@ -302,8 +307,36 @@ mod tests {
                 pattern: "foo".into(),
                 replacement: "bar".into(),
                 global: false,
+                confirm: false,
             }
         );
+    }
+
+    #[test]
+    fn parse_subst_with_confirm_flag() {
+        let cmd = parse("s/foo/bar/c").unwrap();
+        match cmd {
+            Command::Substitute { confirm, .. } => assert!(confirm),
+            _ => panic!("expected Substitute"),
+        }
+    }
+
+    #[test]
+    fn parse_subst_combined_global_and_confirm_flags() {
+        let cmd = parse("%s/foo/bar/gc").unwrap();
+        match cmd {
+            Command::Substitute {
+                all_lines,
+                global,
+                confirm,
+                ..
+            } => {
+                assert!(all_lines);
+                assert!(global);
+                assert!(confirm);
+            }
+            _ => panic!("expected Substitute"),
+        }
     }
 
     #[test]
@@ -315,9 +348,11 @@ mod tests {
                 global,
                 pattern,
                 replacement,
+                confirm,
             } => {
                 assert!(!all_lines);
                 assert!(global);
+                assert!(!confirm);
                 assert_eq!(pattern, "foo");
                 assert_eq!(replacement, "bar");
             }

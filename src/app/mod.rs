@@ -19,6 +19,7 @@ use crate::ui::find::FindState;
 use crate::ui::results::ResultsState;
 use crate::ui::row_detail::RowDetailState;
 use crate::ui::schema_tree::SchemaTreeState;
+use crate::ui::substitute_confirm::SubstituteState;
 use crate::ui::PaneRects;
 
 mod autocomplete;
@@ -121,6 +122,12 @@ pub struct App {
     /// precedence chain.
     pub find: Option<FindState>,
 
+    /// `:s/.../c` interactive substitute confirm modal. While `Some`,
+    /// absorbs `y` / `n` / `a` / `q` and Esc; everything else is
+    /// swallowed. Slotted between `command_line` and `find` so a
+    /// pending confirm can't be hijacked by Ctrl+F.
+    pub subst_confirm: Option<SubstituteState>,
+
     /// SQL of the most recently executed query. Retained so error renderers
     /// can place a caret at the reported POSITION.
     pub last_run_sql: Option<String>,
@@ -166,6 +173,7 @@ impl App {
             file_prompt: None,
             command_line: None,
             find: None,
+            subst_confirm: None,
             last_run_sql: None,
             last_ddl_target: None,
             history: VecDeque::new(),

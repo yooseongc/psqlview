@@ -11,7 +11,7 @@
 //! every match starts and ends on the same row.
 
 mod key;
-mod match_engine;
+pub(crate) mod match_engine;
 mod render;
 
 #[cfg(test)]

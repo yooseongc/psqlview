@@ -4,7 +4,7 @@
 /// Returns `(start_col, end_col)` pairs in char units. Matches don't
 /// overlap — once a match lands, scanning resumes at
 /// `start + needle.chars()`.
-pub(super) fn find_in_line(
+pub(crate) fn find_in_line(
     line: &str,
     needle: &str,
     case_insensitive: bool,

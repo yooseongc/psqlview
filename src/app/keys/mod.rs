@@ -39,6 +39,13 @@ impl App {
             return;
         }
 
+        // Substitute confirm modal — y/n/a/q + Esc. Slotted before
+        // Find so Ctrl+F can't hijack a pending confirm.
+        if self.subst_confirm.is_some() {
+            self.handle_subst_confirm_key(key);
+            return;
+        }
+
         // Find / Find-Replace overlay — absorbs all keys (printable,
         // Backspace, Enter / F3 / Shift+F3 advance, Alt+C toggle,
         // Esc closes).

@@ -16,6 +16,7 @@ pub mod schema_tree;
 pub mod sql_export;
 pub mod sql_lexer;
 pub mod status;
+pub mod substitute_confirm;
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -156,6 +157,9 @@ fn draw_workspace(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
     if let Some(state) = &app.command_line {
         command_line::draw(frame, state, editor_rect);
+    }
+    if let Some(state) = &app.subst_confirm {
+        substitute_confirm::draw(frame, state, editor_rect);
     }
     if let Some(state) = &app.find {
         find::draw(frame, state, editor_rect);

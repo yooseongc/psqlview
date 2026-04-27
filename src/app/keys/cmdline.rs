@@ -1,11 +1,13 @@
 //! `:` command-line key handler + parsed-command dispatcher.
 
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyCode, KeyEvent};
 
 use super::{App, FocusPane};
 use crate::ui::command_line::{self, Command, CommandLineOutcome};
+use crate::ui::editor::buffer::Cursor;
 use crate::ui::file_prompt::FilePromptMode;
 use crate::ui::find::FindState;
+use crate::ui::substitute_confirm::SubstituteState;
 
 impl App {
     /// Routes a keystroke into the `:` command line. On Submit the
@@ -51,8 +53,13 @@ impl App {
                 pattern,
                 replacement,
                 global,
+                confirm,
             } => {
-                self.execute_substitute(all_lines, &pattern, &replacement, global);
+                if confirm {
+                    self.open_subst_confirm(all_lines, pattern, replacement);
+                } else {
+                    self.execute_substitute(all_lines, &pattern, &replacement, global);
+                }
             }
             Command::Write { path } => self.execute_write(path),
             Command::Edit { path } => self.execute_edit(&path),
@@ -126,5 +133,126 @@ impl App {
         let cwd = std::env::current_dir().unwrap_or_default();
         let path = crate::ui::file_prompt::resolve(arg, &cwd);
         self.commit_open(&path);
+    }
+
+    /// Spawns the interactive substitute confirm modal. Cursor jumps
+    /// to the first match so the user sees what's about to change;
+    /// when there are no matches we toast and stay where we were.
+    fn open_subst_confirm(&mut self, all_lines: bool, pattern: String, replacement: String) {
+        let lines: Vec<String> = self.editor().lines().to_vec();
+        let (cur_row, cur_col) = self.editor().cursor_pos();
+        let cursor = Cursor::new(cur_row, cur_col);
+        let restrict_row = if all_lines { None } else { Some(cur_row) };
+        let state = SubstituteState::new(
+            pattern.clone(),
+            replacement,
+            false,
+            cursor,
+            restrict_row,
+            &lines,
+        );
+        if state.done() {
+            self.toast_error(format!("no match for {pattern}"));
+            return;
+        }
+        if let Some((start, _)) = state.current() {
+            self.editor_mut().jump_caret(start);
+        }
+        self.subst_confirm = Some(state);
+    }
+
+    /// Routes y/n/a/q/Esc into the active substitute confirm modal.
+    /// Other keys are silently swallowed so global hotkeys can't
+    /// accidentally cancel a confirm half-way through.
+    pub(super) fn handle_subst_confirm_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => {
+                self.close_subst_confirm();
+            }
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                self.subst_confirm_accept_one();
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') => {
+                self.subst_confirm_skip_one();
+            }
+            KeyCode::Char('a') | KeyCode::Char('A') => {
+                self.subst_confirm_accept_rest();
+            }
+            _ => {}
+        }
+    }
+
+    fn subst_confirm_accept_one(&mut self) {
+        let Some(state) = self.subst_confirm.as_ref() else {
+            return;
+        };
+        let Some((start, end)) = state.current() else {
+            self.close_subst_confirm();
+            return;
+        };
+        let replacement = state.replacement.clone();
+        self.editor_mut().replace_range(start, end, &replacement);
+        self.mark_active_dirty();
+        let lines: Vec<String> = self.editor().lines().to_vec();
+        if let Some(s) = self.subst_confirm.as_mut() {
+            s.after_accept(&lines);
+        }
+        self.subst_confirm_advance_or_close();
+    }
+
+    fn subst_confirm_skip_one(&mut self) {
+        let lines: Vec<String> = self.editor().lines().to_vec();
+        if let Some(s) = self.subst_confirm.as_mut() {
+            s.after_skip(&lines);
+        }
+        self.subst_confirm_advance_or_close();
+    }
+
+    fn subst_confirm_accept_rest(&mut self) {
+        loop {
+            let Some(state) = self.subst_confirm.as_ref() else {
+                return;
+            };
+            let Some((start, end)) = state.current() else {
+                break;
+            };
+            let replacement = state.replacement.clone();
+            self.editor_mut().replace_range(start, end, &replacement);
+            let lines: Vec<String> = self.editor().lines().to_vec();
+            if let Some(s) = self.subst_confirm.as_mut() {
+                s.after_accept(&lines);
+            }
+        }
+        self.mark_active_dirty();
+        self.close_subst_confirm();
+    }
+
+    fn subst_confirm_advance_or_close(&mut self) {
+        let next_pos = self
+            .subst_confirm
+            .as_ref()
+            .and_then(|s| s.current())
+            .map(|(start, _)| start);
+        match next_pos {
+            Some(p) => {
+                self.editor_mut().jump_caret(p);
+            }
+            None => {
+                self.close_subst_confirm();
+            }
+        }
+    }
+
+    fn close_subst_confirm(&mut self) {
+        let (replaced, skipped) = self
+            .subst_confirm
+            .as_ref()
+            .map(|s| (s.replaced, s.skipped))
+            .unwrap_or((0, 0));
+        self.subst_confirm = None;
+        let plural = if replaced == 1 { "" } else { "s" };
+        self.toast_info(format!(
+            "replaced {replaced} occurrence{plural} ({skipped} skipped)"
+        ));
     }
 }
