@@ -12,8 +12,9 @@ impl App {
     /// input is parsed and dispatched via `execute_command`; on
     /// Cancel the overlay closes without side effects.
     pub(super) fn handle_command_line_key(&mut self, key: KeyEvent) {
+        let cwd = std::env::current_dir().unwrap_or_default();
         let outcome = match self.command_line.as_mut() {
-            Some(s) => command_line::handle_key(s, key),
+            Some(s) => command_line::handle_key(s, key, &cwd),
             None => return,
         };
         match outcome {
