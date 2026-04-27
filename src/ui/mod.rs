@@ -9,6 +9,7 @@ pub mod editor;
 pub mod file_prompt;
 pub mod find;
 pub mod json_export;
+pub mod path_hint;
 pub mod results;
 pub mod row_detail;
 pub mod schema_tree;

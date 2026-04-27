@@ -7,43 +7,66 @@ use crate::ui::{csv_export, json_export, sql_export};
 impl App {
     /// Opens the inline filename prompt for the given mode. Closes any
     /// active autocomplete popup so the next keystroke is unambiguously
-    /// routed to the prompt.
+    /// routed to the prompt. Pre-loads the directory hint so the user
+    /// sees the cwd contents immediately on open.
     pub(super) fn open_file_prompt(&mut self, mode: FilePromptMode) {
         self.autocomplete = None;
-        self.file_prompt = Some(FilePromptState::new(mode));
+        let mut state = FilePromptState::new(mode);
+        let cwd = std::env::current_dir().unwrap_or_default();
+        state.refresh_hints(&cwd);
+        self.file_prompt = Some(state);
     }
 
-    /// Routes a keystroke to the file-prompt modal. Only Enter / Esc /
-    /// printable characters / Backspace are meaningful; everything else
-    /// is silently swallowed so global shortcuts like F-keys don't
-    /// dismiss the prompt by accident.
+    /// Routes a keystroke to the file-prompt modal. Up/Down navigate
+    /// the directory hint; Tab commits a hint selection (or does LCP
+    /// completion when nothing is selected); Enter submits (or commits
+    /// the selected hint and submits in one step). Everything else is
+    /// silently swallowed so global shortcuts like F-keys don't dismiss
+    /// the prompt by accident.
     pub(super) fn handle_file_prompt_key(&mut self, key: KeyEvent) {
         let Some(state) = self.file_prompt.as_mut() else {
             return;
         };
+        let cwd = std::env::current_dir().unwrap_or_default();
         match key.code {
             KeyCode::Esc => {
                 self.file_prompt = None;
             }
             KeyCode::Enter => {
+                // If a hint is highlighted, commit it into the input
+                // first so the submit lines up with what the user sees
+                // in the dropdown — matches vim wildmenu semantics.
+                if let Some(committed) = state.hint.commit_selection() {
+                    state.input = committed;
+                }
                 self.commit_file_prompt();
             }
             KeyCode::Backspace => {
                 state.pop_char();
+                state.refresh_hints(&cwd);
+            }
+            KeyCode::Up => {
+                state.hint.select_prev();
+            }
+            KeyCode::Down => {
+                state.hint.select_next();
             }
             KeyCode::Tab => {
-                // Best-effort path completion against the cwd. Quietly
-                // no-ops when the parent directory can't be read or no
-                // entry matches the typed prefix.
-                let cwd = std::env::current_dir().unwrap_or_default();
-                if let Some(completed) = file_prompt::path_complete(&state.input, &cwd) {
+                // Hint selection wins over LCP completion — the user
+                // explicitly highlighted something.
+                if let Some(committed) = state.hint.commit_selection() {
+                    state.input = committed;
+                    state.refresh_hints(&cwd);
+                } else if let Some(completed) = file_prompt::path_complete(&state.input, &cwd) {
                     state.input = completed;
+                    state.refresh_hints(&cwd);
                 }
             }
             KeyCode::Char(c)
                 if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
             {
                 state.push_char(c);
+                state.refresh_hints(&cwd);
             }
             _ => {}
         }

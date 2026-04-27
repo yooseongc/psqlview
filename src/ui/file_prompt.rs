@@ -17,6 +17,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
+use super::path_hint::{self, DirHint};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilePromptMode {
     Open,
@@ -34,10 +36,11 @@ impl FilePromptMode {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct FilePromptState {
     pub mode: FilePromptMode,
     pub input: String,
+    pub hint: DirHint,
 }
 
 impl FilePromptState {
@@ -45,6 +48,7 @@ impl FilePromptState {
         Self {
             mode,
             input: String::new(),
+            hint: DirHint::default(),
         }
     }
 
@@ -58,6 +62,13 @@ impl FilePromptState {
 
     pub fn input(&self) -> &str {
         &self.input
+    }
+
+    /// Re-lists the parent directory of the current input. Caller does
+    /// this after every input mutation (push/pop/replace) so the
+    /// dropdown always matches what the user sees.
+    pub fn refresh_hints(&mut self, cwd: &Path) {
+        self.hint.recompute(&self.input, cwd);
     }
 }
 
@@ -222,6 +233,11 @@ pub fn draw(frame: &mut Frame<'_>, state: &FilePromptState, editor_area: Rect) {
     let paragraph = Paragraph::new(line).block(block);
     frame.render_widget(Clear, area);
     frame.render_widget(paragraph, area);
+
+    // Hint dropdown sits directly above the prompt — caller-supplied
+    // editor area still owns the slot, the hint widget chooses its
+    // own height.
+    path_hint::draw_above_prompt(frame, &state.hint, editor_area, h);
 }
 
 #[cfg(test)]

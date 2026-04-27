@@ -1099,10 +1099,8 @@ fn ctrl_e_with_result_writes_csv() {
     // Explicit `.csv` extension so commit_export's ext-based router
     // picks the CSV writer (the shared `unique_tmp_path` helper
     // happens to use `.sql`, which would steer to SQL INSERT).
-    let path = std::env::temp_dir().join(format!(
-        "psqlview_csvexport_{}.csv",
-        uuid::Uuid::new_v4()
-    ));
+    let path =
+        std::env::temp_dir().join(format!("psqlview_csvexport_{}.csv", uuid::Uuid::new_v4()));
     for c in path.to_string_lossy().chars() {
         app.on_event(AppEvent::Key(key(KeyCode::Char(c), KeyModifiers::NONE)));
     }
